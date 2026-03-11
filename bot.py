@@ -80,11 +80,8 @@ async def scrape_facebook_marketplace() -> list[dict]:
         log.error("APIFY_API_TOKEN not set!")
         return []
 
-    # Build search URL
-    search_url = (
-        f"https://www.facebook.com/marketplace/{SEARCH_LOCATION}/vehicles/motorcycles"
-        f"?minPrice={MIN_PRICE}&maxPrice={MAX_PRICE}&radius={RADIUS_MILES}"
-    )
+    # Exact FB Marketplace URL with location ID and 24hr filter
+    search_url = "https://www.facebook.com/marketplace/112204368792315/search?minPrice=2500&maxPrice=10000&daysSinceListed=1&query=Motorcycle&exact=false"
 
     log.info(f"Starting Apify scrape for: {search_url}")
 
@@ -97,7 +94,6 @@ async def scrape_facebook_marketplace() -> list[dict]:
                 json={
                     "startUrls": [{"url": search_url}],
                     "maxItems": 40,
-                    "addListingDetails": False,
                 },
             )
             resp.raise_for_status()
@@ -162,7 +158,7 @@ async def scrape_facebook_marketplace() -> list[dict]:
                     else:
                         price = None
 
-                if listing_id and price and MIN_PRICE <= price <= MAX_PRICE:
+                if listing_id and price:
                     listings.append({
                         "id": listing_id,
                         "title": title,
