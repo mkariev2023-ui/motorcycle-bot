@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Facebook Marketplace Motorcycle Deal Finder
-Scrapes listings, compares to KBB estimates, and sends good deals to Telegram.
+Uses Apify API to scrape listings, compares to market estimates, sends Telegram alerts.
 """
 
 import asyncio
@@ -9,30 +9,29 @@ import json
 import logging
 import os
 import re
-import time
 from datetime import datetime
 from pathlib import Path
 
 import httpx
-from playwright.async_api import async_playwright
 
 # ─── CONFIG ──────────────────────────────────────────────────────────────────
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8277158161:AAGPpCxXIRvV5sJ_H_zKSopvJ5uErHqkAFs")
-TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID",   "844726737")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+APIFY_API_TOKEN = os.getenv("APIFY_API_TOKEN")
 
-SEARCH_LOCATION    = os.getenv("SEARCH_LOCATION", "Tustin")   # e.g. "dallas"
-SEARCH_ZIP         = os.getenv("SEARCH_ZIP",      "92782")        # your ZIP code
-RADIUS_MILES       = 200
-MIN_PRICE          = 2000
-MAX_PRICE          = 7500
+SEARCH_LOCATION = os.getenv("SEARCH_LOCATION", "tustin-ca")
+MIN_PRICE = 3000
+MAX_PRICE = 7000
+RADIUS_MILES = 200
 
-# A listing is a "good deal" if price <= KBB_DEAL_THRESHOLD * KBB estimate
-# 0.85 means 15% or more below KBB = good deal
-KBB_DEAL_THRESHOLD = 0.85
+# Deal thresholds
+FIRE_DEAL_THRESHOLD = 0.75  # 25%+ below market
+GOOD_DEAL_THRESHOLD = 0.85  # 15%+ below market
 
-CHECK_INTERVAL_SECONDS = 900   # 15 minutes between scans
+CHECK_INTERVAL_SECONDS = 1800  # 30 minutes
 
 SEEN_IDS_FILE = Path("seen_listings.json")
+MAX_SEEN_IDS = 5000  # Trim file if it grows beyond this
 
 logging.basicConfig(
     level=logging.INFO,
@@ -45,102 +44,142 @@ log = logging.getLogger(__name__)
 # ─── SEEN LISTINGS PERSISTENCE ───────────────────────────────────────────────
 
 def load_seen_ids() -> set:
+    """Load previously seen listing IDs from disk."""
     if SEEN_IDS_FILE.exists():
-        return set(json.loads(SEEN_IDS_FILE.read_text()))
+        try:
+            data = json.loads(SEEN_IDS_FILE.read_text())
+            # Trim if too large
+            if len(data) > MAX_SEEN_IDS:
+                data = data[-MAX_SEEN_IDS:]
+            return set(data)
+        except Exception as e:
+            log.error(f"Error loading seen IDs: {e}")
+            return set()
     return set()
 
+
 def save_seen_ids(ids: set):
-    SEEN_IDS_FILE.write_text(json.dumps(list(ids)))
+    """Save seen listing IDs to disk, trimming if necessary."""
+    id_list = list(ids)
+    if len(id_list) > MAX_SEEN_IDS:
+        id_list = id_list[-MAX_SEEN_IDS:]
+    try:
+        SEEN_IDS_FILE.write_text(json.dumps(id_list))
+    except Exception as e:
+        log.error(f"Error saving seen IDs: {e}")
 
 
-# ─── FACEBOOK MARKETPLACE SCRAPER ────────────────────────────────────────────
+# ─── APIFY SCRAPER ────────────────────────────────────────────────────────────
 
-async def scrape_facebook_marketplace(playwright) -> list[dict]:
-    """Scrape FB Marketplace motorcycle listings using a headless browser."""
-    listings = []
+async def scrape_facebook_marketplace() -> list[dict]:
+    """
+    Use Apify's facebook-marketplace-scraper actor to fetch listings.
+    Returns a list of listing dicts with: id, title, price, url, location
+    """
+    if not APIFY_API_TOKEN:
+        log.error("APIFY_API_TOKEN not set!")
+        return []
 
     # Build search URL
-    url = (
+    search_url = (
         f"https://www.facebook.com/marketplace/{SEARCH_LOCATION}/vehicles/motorcycles"
-        f"?minPrice={MIN_PRICE}&maxPrice={MAX_PRICE}"
-        f"&radius={RADIUS_MILES}&exact=false"
+        f"?minPrice={MIN_PRICE}&maxPrice={MAX_PRICE}&radius={RADIUS_MILES}"
     )
 
-    log.info(f"Scraping: {url}")
+    log.info(f"Starting Apify scrape for: {search_url}")
 
-    browser = await playwright.chromium.launch(
-        headless=True,
-        args=["--no-sandbox", "--disable-setuid-sandbox"]
-    )
+    async with httpx.AsyncClient(timeout=300) as client:
+        # Start Apify actor run
+        try:
+            resp = await client.post(
+                "https://api.apify.com/v2/acts/apify~facebook-marketplace-scraper/runs",
+                headers={"Authorization": f"Bearer {APIFY_API_TOKEN}"},
+                json={
+                    "startUrls": [{"url": search_url}],
+                    "maxItems": 40,
+                    "addListingDetails": False,
+                },
+            )
+            resp.raise_for_status()
+            run_data = resp.json()["data"]
+            run_id = run_data["id"]
+            log.info(f"Apify run started: {run_id}")
+        except Exception as e:
+            log.error(f"Failed to start Apify run: {e}")
+            return []
 
-    context = await browser.new_context(
-        user_agent=(
-            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
-            "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
-        ),
-        viewport={"width": 390, "height": 844},
-    )
+        # Poll run status (timeout 5 minutes)
+        status_url = f"https://api.apify.com/v2/actor-runs/{run_id}"
+        max_polls = 30  # 30 polls * 10 sec = 5 min
+        for poll_num in range(max_polls):
+            await asyncio.sleep(10)
+            try:
+                resp = await client.get(
+                    status_url,
+                    headers={"Authorization": f"Bearer {APIFY_API_TOKEN}"},
+                )
+                resp.raise_for_status()
+                status = resp.json()["data"]["status"]
+                log.info(f"Apify run status: {status} (poll {poll_num + 1}/{max_polls})")
 
-    page = await context.new_page()
+                if status == "SUCCEEDED":
+                    break
+                elif status in ("FAILED", "ABORTED", "TIMED-OUT"):
+                    log.error(f"Apify run {status}")
+                    return []
+            except Exception as e:
+                log.error(f"Error polling Apify run status: {e}")
+                return []
+        else:
+            log.error("Apify run timed out (5 minutes)")
+            return []
 
-    try:
-        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-        await asyncio.sleep(5)  # let JS render
+        # Fetch results
+        try:
+            dataset_url = f"https://api.apify.com/v2/actor-runs/{run_id}/dataset/items"
+            resp = await client.get(
+                dataset_url,
+                headers={"Authorization": f"Bearer {APIFY_API_TOKEN}"},
+            )
+            resp.raise_for_status()
+            raw_items = resp.json()
 
-        # Scroll to load more listings
-        for _ in range(4):
-            await page.evaluate("window.scrollBy(0, 1200)")
-            await asyncio.sleep(1.5)
+            # Normalize data
+            listings = []
+            for item in raw_items:
+                # Apify actor returns different field names depending on version
+                listing_id = str(item.get("id") or item.get("listingId") or item.get("itemId", ""))
+                title = item.get("title") or item.get("name") or "Unknown"
+                price = item.get("price")
+                url = item.get("url") or item.get("link", "")
+                location = item.get("location", "")
 
-        # Extract listing cards via JSON-LD or aria attributes
-        raw = await page.evaluate("""
-            () => {
-                const results = [];
-                // FB Marketplace listing cards share a common structure
-                const cards = document.querySelectorAll('a[href*="/marketplace/item/"]');
-                cards.forEach(card => {
-                    const href = card.getAttribute('href') || '';
-                    const idMatch = href.match(/\\/marketplace\\/item\\/(\\d+)/);
-                    if (!idMatch) return;
+                # Parse price if it's a string like "$4,500"
+                if isinstance(price, str):
+                    price_match = re.search(r'[\d,]+', price.replace("$", ""))
+                    if price_match:
+                        price = int(price_match.group().replace(",", ""))
+                    else:
+                        price = None
 
-                    const id = idMatch[1];
-                    const text = card.innerText || '';
-                    const lines = text.split('\\n').map(l => l.trim()).filter(Boolean);
+                if listing_id and price and MIN_PRICE <= price <= MAX_PRICE:
+                    listings.append({
+                        "id": listing_id,
+                        "title": title,
+                        "price": price,
+                        "url": url,
+                        "location": location,
+                    })
 
-                    // Heuristic parsing: first line often title, then price, then location
-                    const priceMatch = text.match(/\\$([\\d,]+)/);
-                    const price = priceMatch ? parseInt(priceMatch[1].replace(/,/g, '')) : null;
+            log.info(f"Apify returned {len(listings)} valid listings")
+            return listings
 
-                    results.push({
-                        id,
-                        url: 'https://www.facebook.com' + href.split('?')[0],
-                        title: lines[0] || 'Unknown',
-                        price,
-                        raw_text: lines.slice(0, 6).join(' | '),
-                    });
-                });
-                // Deduplicate by id
-                const seen = new Set();
-                return results.filter(r => {
-                    if (seen.has(r.id)) return false;
-                    seen.add(r.id);
-                    return true;
-                });
-            }
-        """)
-
-        listings = [r for r in raw if r.get("price") and MIN_PRICE <= r["price"] <= MAX_PRICE]
-        log.info(f"Found {len(listings)} listings in price range")
-
-    except Exception as e:
-        log.error(f"Scrape error: {e}")
-    finally:
-        await browser.close()
-
-    return listings
+        except Exception as e:
+            log.error(f"Error fetching Apify results: {e}")
+            return []
 
 
-# ─── KBB VALUE ESTIMATOR ─────────────────────────────────────────────────────
+# ─── MARKET VALUE ESTIMATOR ───────────────────────────────────────────────────
 
 def parse_year_make_model(title: str) -> tuple[str, str, str]:
     """Best-effort parse of year, make, model from a listing title."""
@@ -150,7 +189,7 @@ def parse_year_make_model(title: str) -> tuple[str, str, str]:
     makes = [
         "Honda", "Yamaha", "Kawasaki", "Suzuki", "Harley", "Harley-Davidson",
         "Ducati", "BMW", "KTM", "Triumph", "Royal Enfield", "Indian",
-        "Aprilia", "Husqvarna", "Can-Am", "Moto Guzzi", "Zero"
+        "Aprilia", "Husqvarna", "Can-Am", "Moto Guzzi", "Zero",
     ]
     make = ""
     for m in makes:
@@ -171,55 +210,83 @@ def parse_year_make_model(title: str) -> tuple[str, str, str]:
     return year, make, model
 
 
-async def estimate_kbb_value(title: str, listed_price: int) -> dict:
+async def estimate_market_value(title: str, listed_price: int) -> dict:
     """
-    Attempt to fetch KBB estimate via their public API / page.
-    Falls back to a heuristic if unavailable.
+    Estimate market value using KBB or NADA Guides.
+    Falls back to depreciation heuristic if both fail.
     """
     year, make, model = parse_year_make_model(title)
-
-    # KBB doesn't have a free public API; we use their search page and scrape
-    # the estimated value range shown. If blocked, we fall back gracefully.
-    kbb_estimate = None
+    market_estimate = None
     source = "heuristic"
 
+    # Try KBB first
     if year and make:
         try:
-            search_url = (
-                f"https://www.kbb.com/motorcycles/{make.lower().replace(' ', '-')}/"
-                f"?year={year}"
-            )
             async with httpx.AsyncClient(
                 timeout=10,
                 follow_redirects=True,
-                headers={"User-Agent": "Mozilla/5.0"}
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
             ) as client:
-                resp = await client.get(search_url)
-                # Look for price patterns like $4,500 - $6,200
-                prices = re.findall(r'\$(\d{1,3}(?:,\d{3})*)', resp.text)
-                numeric = [int(p.replace(',', '')) for p in prices
-                           if 1000 < int(p.replace(',', '')) < 50000]
-                if numeric:
-                    kbb_estimate = int(sum(numeric[:4]) / len(numeric[:4]))
-                    source = "kbb_page"
-        except Exception:
-            pass
+                kbb_url = f"https://www.kbb.com/motorcycles/{make.lower().replace(' ', '-')}/{year}/"
+                resp = await client.get(kbb_url)
+                if resp.status_code == 200:
+                    # Look for price patterns like $4,500 - $6,200
+                    prices = re.findall(r'\$(\d{1,3}(?:,\d{3})*)', resp.text)
+                    numeric = [int(p.replace(',', '')) for p in prices
+                               if 1000 < int(p.replace(',', '')) < 50000]
+                    if numeric:
+                        market_estimate = int(sum(numeric[:4]) / len(numeric[:4]))
+                        source = "kbb"
+                        log.debug(f"KBB estimate for {title}: ${market_estimate:,}")
+        except Exception as e:
+            log.debug(f"KBB lookup failed: {e}")
 
-    # Heuristic fallback: motorcycles typically depreciate ~15% from MSRP
-    # Use listed price as anchor if KBB unavailable
-    if not kbb_estimate:
-        # Conservative: assume listing is roughly at market
-        # Flag as deal only if significantly below similar avg
-        kbb_estimate = int(listed_price * 1.12)  # assume 12% above asking = market
+    # Try NADA Guides if KBB failed
+    if not market_estimate and year and make:
+        try:
+            async with httpx.AsyncClient(
+                timeout=10,
+                follow_redirects=True,
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+            ) as client:
+                nada_url = f"https://www.nadaguides.com/Motorcycles/{year}/{make.replace(' ', '-')}"
+                resp = await client.get(nada_url)
+                if resp.status_code == 200:
+                    prices = re.findall(r'\$(\d{1,3}(?:,\d{3})*)', resp.text)
+                    numeric = [int(p.replace(',', '')) for p in prices
+                               if 1000 < int(p.replace(',', '')) < 50000]
+                    if numeric:
+                        market_estimate = int(sum(numeric[:4]) / len(numeric[:4]))
+                        source = "nada"
+                        log.debug(f"NADA estimate for {title}: ${market_estimate:,}")
+        except Exception as e:
+            log.debug(f"NADA lookup failed: {e}")
+
+    # Heuristic fallback based on age
+    if not market_estimate:
+        current_year = datetime.now().year
+        if year:
+            age = current_year - int(year)
+            if age <= 2:
+                market_estimate = int(listed_price / 0.90)  # assume 10% below
+            elif age <= 5:
+                market_estimate = int(listed_price / 0.88)  # assume 12% below
+            else:
+                market_estimate = int(listed_price / 0.85)  # assume 15% below
+        else:
+            # No year found, conservative estimate
+            market_estimate = int(listed_price / 0.88)
         source = "heuristic"
 
-    discount_pct = round((1 - listed_price / kbb_estimate) * 100, 1)
-    is_deal = listed_price <= kbb_estimate * KBB_DEAL_THRESHOLD
+    discount_pct = round((1 - listed_price / market_estimate) * 100, 1) if market_estimate else 0
+    is_fire_deal = listed_price <= market_estimate * FIRE_DEAL_THRESHOLD
+    is_good_deal = listed_price <= market_estimate * GOOD_DEAL_THRESHOLD
 
     return {
-        "kbb_estimate": kbb_estimate,
+        "market_estimate": market_estimate,
         "discount_pct": discount_pct,
-        "is_deal": is_deal,
+        "is_fire_deal": is_fire_deal,
+        "is_good_deal": is_good_deal,
         "source": source,
         "year": year,
         "make": make,
@@ -229,8 +296,12 @@ async def estimate_kbb_value(title: str, listed_price: int) -> dict:
 
 # ─── TELEGRAM NOTIFIER ───────────────────────────────────────────────────────
 
-async def send_telegram(message: str):
-    """Send a message to Telegram."""
+async def send_telegram(message: str, retry: bool = True):
+    """Send a message to Telegram with optional retry."""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        log.error("Telegram credentials not set!")
+        return
+
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
@@ -238,89 +309,128 @@ async def send_telegram(message: str):
         "parse_mode": "HTML",
         "disable_web_page_preview": False,
     }
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.post(url, json=payload)
-            if resp.status_code != 200:
-                log.error(f"Telegram error: {resp.text}")
-            else:
-                log.info("Telegram notification sent ✅")
-    except Exception as e:
-        log.error(f"Telegram send failed: {e}")
+
+    async with httpx.AsyncClient(timeout=10) as client:
+        for attempt in range(2 if retry else 1):
+            try:
+                resp = await client.post(url, json=payload)
+                if resp.status_code == 200:
+                    log.info("Telegram notification sent")
+                    return
+                else:
+                    log.error(f"Telegram error: {resp.text}")
+            except Exception as e:
+                log.error(f"Telegram send failed (attempt {attempt + 1}): {e}")
+
+            if retry and attempt == 0:
+                await asyncio.sleep(5)
 
 
-def format_deal_message(listing: dict, kbb_info: dict) -> str:
-    deal_emoji = "🔥" if kbb_info["discount_pct"] >= 20 else "✅"
-    kbb_source = "KBB" if kbb_info["source"] == "kbb_page" else "Est. Market"
+def format_deal_message(listing: dict, value_info: dict) -> str:
+    """Format a deal alert message for Telegram."""
+    if value_info["is_fire_deal"]:
+        emoji = "🔥"
+        deal_type = "FIRE DEAL"
+    else:
+        emoji = "✅"
+        deal_type = "GOOD DEAL"
+
+    source_label = {
+        "kbb": "KBB",
+        "nada": "NADA",
+        "heuristic": "Est. Market"
+    }.get(value_info["source"], "Est. Market")
 
     msg = (
-        f"{deal_emoji} <b>MOTORCYCLE DEAL ALERT</b> {deal_emoji}\n\n"
+        f"{emoji} <b>MOTORCYCLE {deal_type} ALERT</b> {emoji}\n\n"
         f"📋 <b>{listing['title']}</b>\n"
         f"💰 Listed: <b>${listing['price']:,}</b>\n"
-        f"📊 {kbb_source} Value: ~${kbb_info['kbb_estimate']:,}\n"
-        f"💸 You Save: ~{kbb_info['discount_pct']}% below market\n\n"
-        f"🔗 <a href=\"{listing['url']}\">View on Facebook Marketplace</a>\n\n"
-        f"⏰ Found at {datetime.now().strftime('%b %d, %Y %I:%M %p')}"
+        f"📊 {source_label} Value: ~${value_info['market_estimate']:,}\n"
+        f"💸 You Save: ~{value_info['discount_pct']}% below market\n\n"
+        f"🔗 <a href=\"{listing['url']}\">View Listing</a>\n\n"
+        f"⏰ Found: {datetime.now().strftime('%b %d, %Y %I:%M %p')}"
     )
     return msg
 
 
 # ─── MAIN LOOP ────────────────────────────────────────────────────────────────
 
-async def run_once(playwright, seen_ids: set) -> set:
-    listings = await scrape_facebook_marketplace(playwright)
-    new_deals = 0
+async def run_scan(seen_ids: set) -> set:
+    """Run one complete scan cycle."""
+    log.info("=" * 60)
+    log.info("Starting new scan...")
 
+    listings = await scrape_facebook_marketplace()
+    if not listings:
+        log.warning("No listings returned from Apify")
+        return seen_ids
+
+    new_deals = 0
     for listing in listings:
         lid = listing["id"]
+
+        # Skip if already seen
         if lid in seen_ids:
             continue
 
         seen_ids.add(lid)
 
-        # Check if it's a good deal
-        kbb_info = await estimate_kbb_value(listing["title"], listing["price"])
+        # Estimate market value
+        value_info = await estimate_market_value(listing["title"], listing["price"])
+
         log.info(
             f"  [{lid}] {listing['title'][:50]} | ${listing['price']:,} | "
-            f"~{kbb_info['discount_pct']}% below est. market"
+            f"{value_info['discount_pct']:+.1f}% vs market ({value_info['source']})"
         )
 
-        if kbb_info["is_deal"]:
-            msg = format_deal_message(listing, kbb_info)
+        # Send alert if it's a deal
+        if value_info["is_good_deal"]:
+            msg = format_deal_message(listing, value_info)
             await send_telegram(msg)
             new_deals += 1
-            await asyncio.sleep(1)  # rate limit
+            await asyncio.sleep(1)  # Rate limit
 
-    log.info(f"Scan complete. {new_deals} new deal(s) sent to Telegram.")
+    log.info(f"Scan complete. Found {len(listings)} listings, sent {new_deals} deal alert(s).")
     save_seen_ids(seen_ids)
     return seen_ids
 
 
 async def main():
+    """Main bot loop."""
     log.info("🏍️  Motorcycle Deal Bot starting up...")
     log.info(f"   Price range: ${MIN_PRICE:,}–${MAX_PRICE:,}")
-    log.info(f"   Radius: {RADIUS_MILES} miles")
-    log.info(f"   Check interval: {CHECK_INTERVAL_SECONDS // 60} min")
+    log.info(f"   Radius: {RADIUS_MILES} miles from {SEARCH_LOCATION}")
+    log.info(f"   Check interval: {CHECK_INTERVAL_SECONDS // 60} minutes")
+    log.info(f"   Deal thresholds: 🔥 {int((1-FIRE_DEAL_THRESHOLD)*100)}%+ | ✅ {int((1-GOOD_DEAL_THRESHOLD)*100)}%+")
+
+    # Verify credentials
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        log.error("ERROR: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not set!")
+        return
+    if not APIFY_API_TOKEN:
+        log.error("ERROR: APIFY_API_TOKEN not set!")
+        return
 
     seen_ids = load_seen_ids()
-    log.info(f"   Already seen: {len(seen_ids)} listings")
+    log.info(f"   Loaded {len(seen_ids)} previously seen listings")
 
     # Send startup message
     await send_telegram(
-        "🏍️ <b>Motorcycle Bot is now running!</b>\n"
+        f"🏍️ <b>Motorcycle Bot is now running!</b>\n"
         f"Searching ${MIN_PRICE:,}–${MAX_PRICE:,} within {RADIUS_MILES} miles.\n"
-        "I'll alert you the moment a good deal appears. 🔥"
+        f"I'll alert you for deals 15%+ below market. 🔥"
     )
 
-    async with async_playwright() as playwright:
-        while True:
-            try:
-                seen_ids = await run_once(playwright, seen_ids)
-            except Exception as e:
-                log.error(f"Unexpected error in run loop: {e}")
+    # Main loop
+    while True:
+        try:
+            seen_ids = await run_scan(seen_ids)
+        except Exception as e:
+            log.error(f"Unexpected error in scan cycle: {e}", exc_info=True)
+            # Don't crash - continue to next cycle
 
-            log.info(f"Sleeping {CHECK_INTERVAL_SECONDS // 60} minutes until next scan...")
-            await asyncio.sleep(CHECK_INTERVAL_SECONDS)
+        log.info(f"Sleeping {CHECK_INTERVAL_SECONDS // 60} minutes until next scan...")
+        await asyncio.sleep(CHECK_INTERVAL_SECONDS)
 
 
 if __name__ == "__main__":
