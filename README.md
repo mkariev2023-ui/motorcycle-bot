@@ -2,11 +2,11 @@
 
 A 24/7 bot that monitors Facebook Marketplace for motorcycle deals and sends instant Telegram alerts when it finds listings significantly below market value.
 
-**100% FREE** - Uses Facebook's GraphQL API directly, no third-party services or costs!
+**100% FREE** - Uses authenticated Facebook session cookies to scrape marketplace directly, no third-party services or costs!
 
 ## What It Does
 
-- **Scrapes Facebook Marketplace** every 30 minutes using direct GraphQL API
+- **Scrapes Facebook Marketplace** every 30 minutes using authenticated session cookies
 - **Searches** Tustin, CA area within 200 miles, price range $2,500–$10,000
 - **Compares** each listing against estimated market value (KBB/NADA/heuristic)
 - **Sends Telegram alerts** instantly for listings 15%+ below market value
@@ -21,7 +21,7 @@ A 24/7 bot that monitors Facebook Marketplace for motorcycle deals and sends ins
 ## Tech Stack
 
 - **Python 3.11+**
-- **Facebook GraphQL API** (direct, no third-party service!)
+- **Authenticated Facebook session** (uses your browser cookies)
 - **httpx** for HTTP calls
 - **Telegram Bot API** for notifications
 - **Railway.app** worker (no web server needed)
@@ -32,7 +32,7 @@ A 24/7 bot that monitors Facebook Marketplace for motorcycle deals and sends ins
 
 ### Prerequisites
 
-Only need Telegram credentials - that's it!
+You'll need Telegram credentials and Facebook session cookies:
 
 1. **Telegram Bot Token**
    - Message [@BotFather](https://t.me/BotFather) on Telegram
@@ -43,6 +43,15 @@ Only need Telegram credentials - that's it!
    - Start a chat with your new bot
    - Visit: `https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates`
    - Find `"chat":{"id":XXXXXXXXX}` in the response
+
+3. **Facebook Session Cookies**
+   - Log into Facebook in your browser
+   - Open Developer Tools (F12) → Application/Storage → Cookies → facebook.com
+   - Copy these 4 cookie values:
+     - `c_user` (your Facebook user ID)
+     - `xs` (session token)
+     - `datr` (device authentication token)
+     - `fr` (Facebook request token)
 
 ---
 
@@ -79,8 +88,12 @@ In Railway dashboard → Variables tab, add:
 |----------|-------|
 | `TELEGRAM_BOT_TOKEN` | Your Telegram bot token |
 | `TELEGRAM_CHAT_ID` | Your Telegram chat ID |
+| `FB_C_USER` | Your Facebook `c_user` cookie |
+| `FB_XS` | Your Facebook `xs` cookie |
+| `FB_DATR` | Your Facebook `datr` cookie |
+| `FB_FR` | Your Facebook `fr` cookie |
 
-That's it! Only 2 environment variables needed.
+Total: 6 environment variables needed.
 
 ### Step 4: Verify It's Running
 
@@ -99,6 +112,10 @@ pip install -r requirements.txt
 # Set environment variables
 export TELEGRAM_BOT_TOKEN="your_token"
 export TELEGRAM_CHAT_ID="your_chat_id"
+export FB_C_USER="your_c_user_cookie"
+export FB_XS="your_xs_cookie"
+export FB_DATR="your_datr_cookie"
+export FB_FR="your_fr_cookie"
 
 # Run the bot
 python bot.py
@@ -153,12 +170,13 @@ Railway will auto-deploy the changes.
 
 ## How It Works
 
-### Direct Facebook GraphQL API
+### Authenticated Facebook Session
 
-The bot queries Facebook's internal GraphQL API directly:
-- **Endpoint**: `https://www.facebook.com/api/graphql/`
-- **Method**: POST with form-encoded data
-- **Response**: JSON with marketplace listings
+The bot uses your Facebook session cookies to access Marketplace as a logged-in user:
+- **Endpoint**: `https://www.facebook.com/marketplace/...`
+- **Method**: GET request with session cookies
+- **Response**: HTML page with embedded JSON data
+- **Extraction**: Regex patterns to find listing IDs, titles, and prices
 
 No third-party scraping service needed - completely free!
 
@@ -196,11 +214,12 @@ No third-party scraping service needed - completely free!
 
 **Log output example:**
 ```
-2026-03-11 09:30:00 [INFO] Querying Facebook GraphQL API (lat: 33.7175, lng: -117.8311, radius: 200 mi)
-2026-03-11 09:30:02 [INFO] Facebook GraphQL API returned 18 valid listings
+2026-03-11 09:30:00 [INFO] Fetching Facebook Marketplace page with authenticated session cookies
+2026-03-11 09:30:01 [INFO] Found 15 item IDs, 15 titles, 15 prices in HTML
+2026-03-11 09:30:02 [INFO] Facebook Marketplace returned 15 valid listings
 2026-03-11 09:30:03 [INFO] [123456] 2019 Honda CB500F | $4,200 | -27.6% vs market (kbb)
 2026-03-11 09:30:04 [INFO] Telegram notification sent
-2026-03-11 09:30:20 [INFO] Scan complete. Found 18 listings, sent 2 deal alert(s).
+2026-03-11 09:30:20 [INFO] Scan complete. Found 15 listings, sent 2 deal alert(s).
 2026-03-11 09:30:20 [INFO] Sleeping 30 minutes until next scan...
 ```
 
@@ -210,7 +229,7 @@ No third-party scraping service needed - completely free!
 
 **Completely FREE!**
 - Railway: $5 credit/month (≈500 hours) - plenty for 24/7 operation
-- Facebook GraphQL API: Free (no rate limits for reasonable use)
+- Facebook Marketplace scraping: Free (uses your session cookies)
 - KBB/NADA scraping: Free
 - Telegram Bot API: Free
 
@@ -220,23 +239,28 @@ No third-party scraping services, no API costs, just free Railway hosting!
 
 ## Troubleshooting
 
-**"No listings returned from Facebook GraphQL API"**
-- Facebook may have changed their GraphQL API structure
-- Check logs for error details
-- The `doc_id` parameter may need updating (Facebook changes these periodically)
+**"Facebook session cookies not set!"**
+- Verify you added all 4 cookie environment variables in Railway
+- Check that cookie values don't have extra spaces or quotes
+- Make sure you're logged into Facebook when extracting cookies
+
+**"No listings returned from Facebook Marketplace"**
+- Your Facebook cookies may have expired (they last ~1-2 months)
+- Get fresh cookies by logging into Facebook again
+- Check the HTML response in logs for errors
 
 **"Telegram error: Unauthorized"**
 - Double-check your TELEGRAM_BOT_TOKEN
 - Ensure you started a chat with your bot first
 
-**"Facebook GraphQL API returned status 400/403"**
-- Facebook may be rate-limiting or detecting automated requests
-- Wait 30 minutes and let it retry
-- The bot includes proper headers to mimic a real browser
+**"Facebook returned status 400/403"**
+- Your session cookies are invalid or expired
+- Log into Facebook and get fresh cookies
+- Update the 4 cookie environment variables in Railway
 
 **Bot keeps restarting**
 - Check Railway logs for the error
-- Common issue: Invalid credentials
+- Common issues: Invalid or expired Facebook cookies, missing env vars
 
 ---
 

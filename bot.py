@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 Facebook Marketplace Motorcycle Deal Finder
-Queries Facebook's GraphQL API directly - completely free, no third-party services.
+Uses authenticated Facebook session cookies to scrape marketplace listings.
+Completely free - no third-party services needed.
 """
 
 import asyncio
@@ -18,6 +19,12 @@ import httpx
 # ─── CONFIG ──────────────────────────────────────────────────────────────────
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+
+# Facebook session cookies (for authenticated requests)
+FB_C_USER = os.getenv("FB_C_USER")
+FB_XS = os.getenv("FB_XS")
+FB_DATR = os.getenv("FB_DATR")
+FB_FR = os.getenv("FB_FR")
 
 # Search parameters (Tustin, CA area)
 SEARCH_LATITUDE = 33.7175
@@ -71,180 +78,170 @@ def save_seen_ids(ids: set):
         log.error(f"Error saving seen IDs: {e}")
 
 
-# ─── FACEBOOK GRAPHQL SCRAPER ────────────────────────────────────────────────
+# ─── FACEBOOK AUTHENTICATED SCRAPER ──────────────────────────────────────────
 
 async def scrape_facebook_marketplace() -> list[dict]:
     """
-    Query Facebook's internal GraphQL API directly to fetch motorcycle listings.
-    Completely free - no third-party services needed.
+    Scrape Facebook Marketplace using authenticated session cookies.
+    Fetches the HTML page and extracts embedded JSON data.
     Returns a list of listing dicts with: id, title, price, url, location
     """
-    log.info(f"Querying Facebook GraphQL API (lat: {SEARCH_LATITUDE}, lng: {SEARCH_LONGITUDE}, radius: {RADIUS_MILES} mi)")
+    if not all([FB_C_USER, FB_XS, FB_DATR, FB_FR]):
+        log.error("Facebook session cookies not set! Need FB_C_USER, FB_XS, FB_DATR, FB_FR")
+        return []
 
-    # GraphQL query parameters
-    variables = {
-        "count": 40,
-        "params": {
-            "bqf": {
-                "callsite": "COMMERCE_MSITE_MARKETPLACE_FEED",
-                "query": "Motorcycle"
-            },
-            "bqvariables": {
-                "buyLocation": {
-                    "latitude": SEARCH_LATITUDE,
-                    "longitude": SEARCH_LONGITUDE
-                },
-                "priceRange": [MIN_PRICE, MAX_PRICE],
-                "radius": RADIUS_MILES
-            }
-        }
+    log.info("Fetching Facebook Marketplace page with authenticated session cookies")
+
+    # Build marketplace search URL
+    marketplace_url = (
+        f"https://www.facebook.com/marketplace/112204368792315/search"
+        f"?minPrice={MIN_PRICE}&maxPrice={MAX_PRICE}"
+        f"&daysSinceListed=1&query=Motorcycle&exact=false"
+    )
+
+    # Prepare cookies
+    cookies = {
+        "c_user": FB_C_USER,
+        "xs": FB_XS,
+        "datr": FB_DATR,
+        "fr": FB_FR,
     }
 
+    # Headers to mimic real browser
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "application/json",
-        "Content-Type": "application/x-www-form-urlencoded",
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Accept": "*/*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": marketplace_url,
         "Origin": "https://www.facebook.com",
-        "Referer": "https://www.facebook.com/marketplace/",
-        "Sec-Fetch-Dest": "empty",
-        "Sec-Fetch-Mode": "cors",
         "Sec-Fetch-Site": "same-origin",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Dest": "empty",
     }
-
-    # Try multiple known doc_ids for FB Marketplace search (2025/2026)
-    doc_ids = [
-        "9053288348063931",
-        "6243297902381423",
-        "7111939778879383",
-    ]
 
     try:
-        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
-            for doc_id in doc_ids:
-                log.info(f"Trying doc_id: {doc_id}")
+        async with httpx.AsyncClient(
+            timeout=30,
+            follow_redirects=True,
+            cookies=cookies
+        ) as client:
+            # Make GET request to marketplace page
+            log.info(f"GET {marketplace_url}")
+            resp = await client.get(marketplace_url, headers=headers)
 
-                # Form-encoded body for GraphQL request
-                form_data = {
-                    "variables": json.dumps(variables),
-                    "doc_id": doc_id
-                }
+            if resp.status_code != 200:
+                log.error(f"Facebook returned status {resp.status_code}")
+                log.debug(f"Response: {resp.text[:500]}")
+                return []
 
-                resp = await client.post(
-                    "https://www.facebook.com/api/graphql/",
-                    headers=headers,
-                    data=urlencode(form_data),
-                )
+            html = resp.text
 
-                if resp.status_code != 200:
-                    log.error(f"Facebook GraphQL API returned status {resp.status_code} for doc_id {doc_id}")
-                    log.debug(f"Response: {resp.text[:500]}")
-                    continue
+            # DEBUG: Log first 2000 chars of HTML
+            log.info(f"HTML RESPONSE (first 2000 chars): {html[:2000]}")
 
-                # DEBUG: Print raw response to see actual structure
-                log.info(f"RAW RESPONSE (doc_id {doc_id}): {resp.text[:3000]}")
+            # Extract embedded JSON data from HTML
+            # Facebook embeds data in various formats, try multiple patterns
+            listings = []
 
-                try:
-                    data = resp.json()
-                except Exception as e:
-                    log.error(f"Failed to parse JSON for doc_id {doc_id}: {e}")
-                    continue
+            # Pattern 1: Look for __bbox or similar JSON data containers
+            json_patterns = [
+                r'<script[^>]*>.*?"marketplace_listing_title".*?</script>',
+                r'<script[^>]*>.*?"formatted_price".*?</script>',
+                r'<script[^>]*type="application/json"[^>]*>(.*?)</script>',
+            ]
 
-                # Check if response has 'data' key
-                if not isinstance(data, dict) or "data" not in data:
-                    log.warning(f"No 'data' key in response for doc_id {doc_id}")
-                    continue
-
-                log.info(f"doc_id {doc_id} returned valid response with 'data' key")
-
-                # Try multiple response path fallbacks
-                feed_units = None
-                response_paths = [
-                    ("data", "marketplace_search", "feed_units", "edges"),
-                    ("data", "viewer", "marketplace_feed_stories", "edges"),
-                    ("data", "marketplace_feed", "edges"),
-                ]
-
-                for path in response_paths:
+            for pattern in json_patterns:
+                matches = re.findall(pattern, html, re.DOTALL)
+                for match in matches:
                     try:
-                        current = data
-                        for key in path:
-                            current = current[key]
-                        feed_units = current
-                        log.info(f"Successfully found data at path: {' -> '.join(path)}")
-                        break
-                    except (KeyError, TypeError):
-                        continue
+                        # Try to extract JSON from script tag
+                        if isinstance(match, tuple):
+                            match = match[0]
 
-                if not feed_units:
-                    log.warning(f"Could not find feed_units in any known path for doc_id {doc_id}")
-                    log.debug(f"Available keys in data: {list(data.get('data', {}).keys()) if 'data' in data else 'N/A'}")
-                    continue
+                        # Clean up script tags
+                        json_text = re.sub(r'</?script[^>]*>', '', match)
 
-                # Parse listings from feed_units
-                listings = []
-                for edge in feed_units:
-                    try:
-                        node = edge.get("node", {})
-                        listing_data = node.get("listing", {})
-
-                        if not listing_data:
-                            continue
-
-                        # Extract listing details
-                        listing_id = listing_data.get("id", "")
-                        title = listing_data.get("marketplace_listing_title", "Unknown")
-
-                        # Extract price
-                        price_data = listing_data.get("formatted_price", {})
-                        price_text = price_data.get("text", "")
-                        price = None
-                        if price_text:
-                            price_match = re.search(r'[\d,]+', price_text.replace("$", ""))
-                            if price_match:
-                                price = int(price_match.group().replace(",", ""))
-
-                        # Extract location
-                        location_data = listing_data.get("location", {})
-                        reverse_geocode = location_data.get("reverse_geocode", {})
-                        city = reverse_geocode.get("city", "Unknown")
-
-                        # Extract image URL (optional, for future use)
-                        photo_data = listing_data.get("primary_listing_photo", {})
-                        image_data = photo_data.get("image", {})
-                        image_url = image_data.get("uri", "")
-
-                        # Build marketplace URL
-                        url = f"https://www.facebook.com/marketplace/item/{listing_id}/"
-
-                        if listing_id and price and MIN_PRICE <= price <= MAX_PRICE:
-                            listings.append({
-                                "id": listing_id,
-                                "title": title,
-                                "price": price,
-                                "url": url,
-                                "location": city,
-                                "image_url": image_url,
-                            })
-
+                        # Try to parse as JSON
+                        try:
+                            data = json.loads(json_text)
+                        except:
+                            # If not valid JSON, try to find JSON objects within the text
+                            json_objects = re.findall(r'\{[^\{\}]*"marketplace_listing_title"[^\}]*\}', json_text)
+                            for obj_str in json_objects:
+                                try:
+                                    data = json.loads(obj_str)
+                                    # Process this data object
+                                except:
+                                    continue
                     except Exception as e:
-                        log.debug(f"Error parsing listing node: {e}")
+                        log.debug(f"Error parsing JSON from HTML: {e}")
                         continue
 
-                if listings:
-                    log.info(f"Facebook GraphQL API returned {len(listings)} valid listings using doc_id {doc_id}")
-                    return listings
-                else:
-                    log.warning(f"doc_id {doc_id} returned 0 listings, trying next doc_id...")
+            # Pattern 2: Direct regex extraction for listing IDs, titles, and prices
+            # Look for marketplace item links
+            item_pattern = r'/marketplace/item/(\d+)/'
+            item_ids = re.findall(item_pattern, html)
 
-            # If we get here, none of the doc_ids worked
-            log.error("All doc_ids failed to return listings")
-            return []
+            # Look for titles (usually near "marketplace_listing_title")
+            title_pattern = r'"marketplace_listing_title":"([^"]+)"'
+            titles = re.findall(title_pattern, html)
+
+            # Look for prices (usually near "formatted_price")
+            price_pattern = r'"formatted_price":\{"text":"(\$?[\d,]+)"'
+            price_matches = re.findall(price_pattern, html)
+
+            log.info(f"Found {len(item_ids)} item IDs, {len(titles)} titles, {len(price_matches)} prices in HTML")
+
+            # Combine extracted data into listings
+            # Match up IDs, titles, and prices (they should appear in same order)
+            max_items = min(len(item_ids), len(titles), len(price_matches))
+
+            for i in range(max_items):
+                try:
+                    listing_id = item_ids[i]
+                    title = titles[i]
+                    price_text = price_matches[i]
+
+                    # Parse price
+                    price = None
+                    price_match = re.search(r'[\d,]+', price_text.replace("$", ""))
+                    if price_match:
+                        price = int(price_match.group().replace(",", ""))
+
+                    # Build listing URL
+                    url = f"https://www.facebook.com/marketplace/item/{listing_id}/"
+
+                    if listing_id and price and MIN_PRICE <= price <= MAX_PRICE:
+                        listings.append({
+                            "id": listing_id,
+                            "title": title,
+                            "price": price,
+                            "url": url,
+                            "location": "Unknown",  # Location not easily extractable from HTML
+                            "image_url": "",
+                        })
+                        log.debug(f"Extracted listing: {listing_id} - {title} - ${price}")
+
+                except Exception as e:
+                    log.debug(f"Error processing listing {i}: {e}")
+                    continue
+
+            # Deduplicate by ID
+            seen_ids = set()
+            unique_listings = []
+            for listing in listings:
+                if listing["id"] not in seen_ids:
+                    seen_ids.add(listing["id"])
+                    unique_listings.append(listing)
+
+            log.info(f"Facebook Marketplace returned {len(unique_listings)} valid listings")
+            return unique_listings
 
     except httpx.TimeoutException:
-        log.error("Facebook GraphQL API request timed out")
+        log.error("Facebook request timed out")
         return []
     except Exception as e:
-        log.error(f"Error querying Facebook GraphQL API: {e}", exc_info=True)
+        log.error(f"Error scraping Facebook Marketplace: {e}", exc_info=True)
         return []
 
 
@@ -432,7 +429,7 @@ async def run_scan(seen_ids: set) -> set:
 
     listings = await scrape_facebook_marketplace()
     if not listings:
-        log.warning("No listings returned from Facebook GraphQL API")
+        log.warning("No listings returned from Facebook Marketplace")
         return seen_ids
 
     new_deals = 0
@@ -472,11 +469,15 @@ async def main():
     log.info(f"   Radius: {RADIUS_MILES} miles from Tustin, CA")
     log.info(f"   Check interval: {CHECK_INTERVAL_SECONDS // 60} minutes")
     log.info(f"   Deal thresholds: 🔥 {int((1-FIRE_DEAL_THRESHOLD)*100)}%+ | ✅ {int((1-GOOD_DEAL_THRESHOLD)*100)}%+")
-    log.info(f"   Using FREE Facebook GraphQL API (no third-party costs!)")
+    log.info(f"   Using authenticated Facebook session cookies")
 
     # Verify credentials
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         log.error("ERROR: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not set!")
+        return
+
+    if not all([FB_C_USER, FB_XS, FB_DATR, FB_FR]):
+        log.error("ERROR: Facebook session cookies not set! Need FB_C_USER, FB_XS, FB_DATR, FB_FR")
         return
 
     seen_ids = load_seen_ids()
@@ -486,7 +487,7 @@ async def main():
     await send_telegram(
         f"🏍️ <b>Motorcycle Bot is now running!</b>\n"
         f"Searching ${MIN_PRICE:,}–${MAX_PRICE:,} within {RADIUS_MILES} miles.\n"
-        f"Using free Facebook GraphQL API - no costs!\n"
+        f"Using authenticated Facebook session - no costs!\n"
         f"I'll alert you for deals 15%+ below market. 🔥"
     )
 
