@@ -100,12 +100,6 @@ async def scrape_facebook_marketplace() -> list[dict]:
         }
     }
 
-    # Form-encoded body for GraphQL request
-    form_data = {
-        "variables": json.dumps(variables),
-        "doc_id": "7111939778879383"
-    }
-
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept": "application/json",
@@ -117,86 +111,140 @@ async def scrape_facebook_marketplace() -> list[dict]:
         "Sec-Fetch-Site": "same-origin",
     }
 
+    # Try multiple known doc_ids for FB Marketplace search (2025/2026)
+    doc_ids = [
+        "9053288348063931",
+        "6243297902381423",
+        "7111939778879383",
+    ]
+
     try:
         async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
-            resp = await client.post(
-                "https://www.facebook.com/api/graphql/",
-                headers=headers,
-                data=urlencode(form_data),
-            )
+            for doc_id in doc_ids:
+                log.info(f"Trying doc_id: {doc_id}")
 
-            if resp.status_code != 200:
-                log.error(f"Facebook GraphQL API returned status {resp.status_code}")
-                log.debug(f"Response: {resp.text[:500]}")
-                return []
+                # Form-encoded body for GraphQL request
+                form_data = {
+                    "variables": json.dumps(variables),
+                    "doc_id": doc_id
+                }
 
-            data = resp.json()
+                resp = await client.post(
+                    "https://www.facebook.com/api/graphql/",
+                    headers=headers,
+                    data=urlencode(form_data),
+                )
 
-            # Navigate through the GraphQL response structure
-            try:
-                feed_units = data["data"]["marketplace_search"]["feed_units"]["edges"]
-            except (KeyError, TypeError) as e:
-                log.error(f"Unexpected GraphQL response structure: {e}")
-                log.debug(f"Response keys: {data.keys() if isinstance(data, dict) else 'not a dict'}")
-                return []
-
-            listings = []
-            for edge in feed_units:
-                try:
-                    node = edge.get("node", {})
-                    listing_data = node.get("listing", {})
-
-                    if not listing_data:
-                        continue
-
-                    # Extract listing details
-                    listing_id = listing_data.get("id", "")
-                    title = listing_data.get("marketplace_listing_title", "Unknown")
-
-                    # Extract price
-                    price_data = listing_data.get("formatted_price", {})
-                    price_text = price_data.get("text", "")
-                    price = None
-                    if price_text:
-                        price_match = re.search(r'[\d,]+', price_text.replace("$", ""))
-                        if price_match:
-                            price = int(price_match.group().replace(",", ""))
-
-                    # Extract location
-                    location_data = listing_data.get("location", {})
-                    reverse_geocode = location_data.get("reverse_geocode", {})
-                    city = reverse_geocode.get("city", "Unknown")
-
-                    # Extract image URL (optional, for future use)
-                    photo_data = listing_data.get("primary_listing_photo", {})
-                    image_data = photo_data.get("image", {})
-                    image_url = image_data.get("uri", "")
-
-                    # Build marketplace URL
-                    url = f"https://www.facebook.com/marketplace/item/{listing_id}/"
-
-                    if listing_id and price and MIN_PRICE <= price <= MAX_PRICE:
-                        listings.append({
-                            "id": listing_id,
-                            "title": title,
-                            "price": price,
-                            "url": url,
-                            "location": city,
-                            "image_url": image_url,
-                        })
-
-                except Exception as e:
-                    log.debug(f"Error parsing listing node: {e}")
+                if resp.status_code != 200:
+                    log.error(f"Facebook GraphQL API returned status {resp.status_code} for doc_id {doc_id}")
+                    log.debug(f"Response: {resp.text[:500]}")
                     continue
 
-            log.info(f"Facebook GraphQL API returned {len(listings)} valid listings")
-            return listings
+                # DEBUG: Print raw response to see actual structure
+                log.info(f"RAW RESPONSE (doc_id {doc_id}): {resp.text[:3000]}")
+
+                try:
+                    data = resp.json()
+                except Exception as e:
+                    log.error(f"Failed to parse JSON for doc_id {doc_id}: {e}")
+                    continue
+
+                # Check if response has 'data' key
+                if not isinstance(data, dict) or "data" not in data:
+                    log.warning(f"No 'data' key in response for doc_id {doc_id}")
+                    continue
+
+                log.info(f"doc_id {doc_id} returned valid response with 'data' key")
+
+                # Try multiple response path fallbacks
+                feed_units = None
+                response_paths = [
+                    ("data", "marketplace_search", "feed_units", "edges"),
+                    ("data", "viewer", "marketplace_feed_stories", "edges"),
+                    ("data", "marketplace_feed", "edges"),
+                ]
+
+                for path in response_paths:
+                    try:
+                        current = data
+                        for key in path:
+                            current = current[key]
+                        feed_units = current
+                        log.info(f"Successfully found data at path: {' -> '.join(path)}")
+                        break
+                    except (KeyError, TypeError):
+                        continue
+
+                if not feed_units:
+                    log.warning(f"Could not find feed_units in any known path for doc_id {doc_id}")
+                    log.debug(f"Available keys in data: {list(data.get('data', {}).keys()) if 'data' in data else 'N/A'}")
+                    continue
+
+                # Parse listings from feed_units
+                listings = []
+                for edge in feed_units:
+                    try:
+                        node = edge.get("node", {})
+                        listing_data = node.get("listing", {})
+
+                        if not listing_data:
+                            continue
+
+                        # Extract listing details
+                        listing_id = listing_data.get("id", "")
+                        title = listing_data.get("marketplace_listing_title", "Unknown")
+
+                        # Extract price
+                        price_data = listing_data.get("formatted_price", {})
+                        price_text = price_data.get("text", "")
+                        price = None
+                        if price_text:
+                            price_match = re.search(r'[\d,]+', price_text.replace("$", ""))
+                            if price_match:
+                                price = int(price_match.group().replace(",", ""))
+
+                        # Extract location
+                        location_data = listing_data.get("location", {})
+                        reverse_geocode = location_data.get("reverse_geocode", {})
+                        city = reverse_geocode.get("city", "Unknown")
+
+                        # Extract image URL (optional, for future use)
+                        photo_data = listing_data.get("primary_listing_photo", {})
+                        image_data = photo_data.get("image", {})
+                        image_url = image_data.get("uri", "")
+
+                        # Build marketplace URL
+                        url = f"https://www.facebook.com/marketplace/item/{listing_id}/"
+
+                        if listing_id and price and MIN_PRICE <= price <= MAX_PRICE:
+                            listings.append({
+                                "id": listing_id,
+                                "title": title,
+                                "price": price,
+                                "url": url,
+                                "location": city,
+                                "image_url": image_url,
+                            })
+
+                    except Exception as e:
+                        log.debug(f"Error parsing listing node: {e}")
+                        continue
+
+                if listings:
+                    log.info(f"Facebook GraphQL API returned {len(listings)} valid listings using doc_id {doc_id}")
+                    return listings
+                else:
+                    log.warning(f"doc_id {doc_id} returned 0 listings, trying next doc_id...")
+
+            # If we get here, none of the doc_ids worked
+            log.error("All doc_ids failed to return listings")
+            return []
 
     except httpx.TimeoutException:
         log.error("Facebook GraphQL API request timed out")
         return []
     except Exception as e:
-        log.error(f"Error querying Facebook GraphQL API: {e}")
+        log.error(f"Error querying Facebook GraphQL API: {e}", exc_info=True)
         return []
 
 
