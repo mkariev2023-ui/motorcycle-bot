@@ -80,6 +80,24 @@ def save_seen_ids(ids: set):
 
 # ─── FACEBOOK AUTHENTICATED SCRAPER ──────────────────────────────────────────
 
+def find_keys(obj, search_terms, path="", results=None):
+    """
+    Recursively search through a JSON object for keys containing specific terms.
+    Returns a list of paths to matching keys with their values (truncated).
+    """
+    if results is None:
+        results = []
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if any(term in str(k).lower() for term in search_terms):
+                results.append(f"{path}.{k} = {str(v)[:100]}")
+            find_keys(v, search_terms, f"{path}.{k}", results)
+    elif isinstance(obj, list):
+        for i, v in enumerate(obj):
+            find_keys(v, search_terms, f"{path}[{i}]", results)
+    return results
+
+
 async def scrape_facebook_marketplace() -> list[dict]:
     """
     Scrape Facebook Marketplace using authenticated session cookies.
@@ -177,6 +195,21 @@ async def scrape_facebook_marketplace() -> list[dict]:
                     # Look for patterns that indicate marketplace listings
                     if 'marketplace' in script_str.lower() or 'listing' in script_str:
                         log.info(f"Script #{idx + 1} contains marketplace/listing data")
+
+                        # Log first 1000 chars of raw script content
+                        log.info(f"SCRIPT #{idx + 1} CONTENT: {script_content[:1000]}")
+
+                        # Recursively search for relevant keys
+                        search_terms = ['price', 'title', 'listing', 'motorcycle']
+                        found_keys = find_keys(script_json, search_terms)
+
+                        if found_keys:
+                            log.info(f"  Found {len(found_keys)} relevant keys in script #{idx + 1}")
+                            # Log first 20 results
+                            for key_result in found_keys[:20]:
+                                log.info(f"    {key_result}")
+                        else:
+                            log.info(f"  No relevant keys found in script #{idx + 1}")
 
                         # Extract listing IDs from this JSON blob
                         listing_ids_in_script = re.findall(r'"id":"(\d{15,16})"', script_str)
