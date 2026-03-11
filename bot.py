@@ -154,52 +154,68 @@ async def scrape_facebook_marketplace() -> list[dict]:
             # Extract embedded JSON data from HTML
             listings = []
 
-            # Try to extract __bbox JSON blob
-            bbox_data = None
-            bbox_patterns = [
-                r'__bbox\s*=\s*(\{.*?\})\s*;',
-                r'"__bbox":\s*(\{[^}]+\})',
-                r'__bbox"?:\s*(\{(?:[^{}]|\{[^{}]*\})*\})',
-            ]
+            # KEY INSIGHT: Facebook's data is in <script type="application/json" data-sjs> tags
+            # Find and parse these JSON blobs (especially the large 281KB one)
+            script_pattern = r'<script type="application/json"[^>]*data-sjs[^>]*>(.*?)</script>'
+            json_scripts = re.findall(script_pattern, html, re.DOTALL)
 
-            for pattern in bbox_patterns:
-                bbox_match = re.search(pattern, html, re.DOTALL)
-                if bbox_match:
-                    try:
-                        bbox_json = bbox_match.group(1)
-                        bbox_data = json.loads(bbox_json)
-                        log.info(f"Successfully parsed __bbox JSON using pattern: {pattern[:30]}...")
-                        log.info(f"__bbox keys: {list(bbox_data.keys()) if isinstance(bbox_data, dict) else 'not a dict'}")
-                        break
-                    except Exception as e:
-                        log.debug(f"Failed to parse __bbox JSON: {e}")
+            log.info(f"Found {len(json_scripts)} data-sjs JSON script tags")
 
-            # Try alternative patterns for server-side rendered listing data
-            # Pattern 1: listing_id
-            listing_ids = re.findall(r'"listing_id":"(\d+)"', html)
-            log.info(f"Found {len(listing_ids)} listing_ids")
+            # Parse each JSON script and search for marketplace listing data
+            all_listing_data = []
 
-            # Pattern 2: name (titles between 10-80 chars)
-            names = re.findall(r'"name":"([^"]{10,80})"', html)
-            log.info(f"Found {len(names)} names")
+            for idx, script_content in enumerate(json_scripts):
+                try:
+                    script_json = json.loads(script_content)
+                    script_size = len(script_content)
+                    log.info(f"Parsed JSON script #{idx + 1}, size: {script_size} chars")
 
-            # Pattern 3: price with $ and amount
-            price_pattern = r'"\$":"([^"]+)".*?"amount":"(\d+)"'
-            price_tuples = re.findall(price_pattern, html)
-            log.info(f"Found {len(price_tuples)} price tuples")
+                    # Convert to string to search for marketplace patterns
+                    script_str = json.dumps(script_json)
 
-            # Also try simpler patterns
-            simple_listing_ids = re.findall(r'"id":"(\d{15,16})"', html)
-            log.info(f"Found {len(simple_listing_ids)} simple IDs (15-16 digits)")
+                    # Search within this JSON for marketplace listing data
+                    # Look for patterns that indicate marketplace listings
+                    if 'marketplace' in script_str.lower() or 'listing' in script_str:
+                        log.info(f"Script #{idx + 1} contains marketplace/listing data")
 
-            # Combine data sources - prioritize listing_ids if found
-            ids_to_use = listing_ids if len(listing_ids) > 0 else simple_listing_ids
-            titles_to_use = names
+                        # Extract listing IDs from this JSON blob
+                        listing_ids_in_script = re.findall(r'"id":"(\d{15,16})"', script_str)
 
-            # Extract prices from tuples
-            price_matches = [int(amount) for _, amount in price_tuples] if price_tuples else []
+                        # Extract titles/names
+                        titles_in_script = re.findall(r'"marketplace_listing_title":"([^"]+)"', script_str)
+                        if not titles_in_script:
+                            titles_in_script = re.findall(r'"name":"([^"]{15,100})"', script_str)
 
-            log.info(f"Using {len(ids_to_use)} IDs, {len(titles_to_use)} titles, {len(price_matches)} prices")
+                        # Extract prices
+                        prices_in_script = re.findall(r'"listing_price"[^}]*"amount":"(\d+)"', script_str)
+                        if not prices_in_script:
+                            prices_in_script = re.findall(r'"amount":"(\d+)"[^}]*"currency":"USD"', script_str)
+
+                        log.info(f"  In script #{idx + 1}: {len(listing_ids_in_script)} IDs, {len(titles_in_script)} titles, {len(prices_in_script)} prices")
+
+                        if listing_ids_in_script or titles_in_script or prices_in_script:
+                            all_listing_data.append({
+                                'ids': listing_ids_in_script,
+                                'titles': titles_in_script,
+                                'prices': prices_in_script
+                            })
+
+                except json.JSONDecodeError as e:
+                    log.debug(f"Could not parse JSON script #{idx + 1}: {e}")
+                except Exception as e:
+                    log.debug(f"Error processing JSON script #{idx + 1}: {e}")
+
+            # Combine all listing data from all scripts
+            ids_to_use = []
+            titles_to_use = []
+            price_matches = []
+
+            for data in all_listing_data:
+                ids_to_use.extend(data['ids'])
+                titles_to_use.extend(data['titles'])
+                price_matches.extend([int(p) for p in data['prices']])
+
+            log.info(f"Combined from all scripts: {len(ids_to_use)} IDs, {len(titles_to_use)} titles, {len(price_matches)} prices")
 
             # Match up IDs, titles, and prices (they should appear in same order in the HTML)
             max_items = min(len(ids_to_use), len(titles_to_use), len(price_matches)) if price_matches else min(len(ids_to_use), len(titles_to_use))
