@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Facebook Marketplace Motorcycle Deal Finder
-Uses Apify API to scrape listings, compares to market estimates, sends Telegram alerts.
+Queries Facebook's GraphQL API directly - completely free, no third-party services.
 """
 
 import asyncio
@@ -11,17 +11,19 @@ import os
 import re
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlencode
 
 import httpx
 
 # ─── CONFIG ──────────────────────────────────────────────────────────────────
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-APIFY_API_TOKEN = os.getenv("APIFY_API_TOKEN")
 
-SEARCH_LOCATION = os.getenv("SEARCH_LOCATION", "losangeles")
-MIN_PRICE = 3000
-MAX_PRICE = 7000
+# Search parameters (Tustin, CA area)
+SEARCH_LATITUDE = 33.7175
+SEARCH_LONGITUDE = -117.8311
+MIN_PRICE = 2500
+MAX_PRICE = 10000
 RADIUS_MILES = 200
 
 # Deal thresholds
@@ -69,110 +71,133 @@ def save_seen_ids(ids: set):
         log.error(f"Error saving seen IDs: {e}")
 
 
-# ─── APIFY SCRAPER ────────────────────────────────────────────────────────────
+# ─── FACEBOOK GRAPHQL SCRAPER ────────────────────────────────────────────────
 
 async def scrape_facebook_marketplace() -> list[dict]:
     """
-    Use Apify's facebook-marketplace-scraper actor to fetch listings.
+    Query Facebook's internal GraphQL API directly to fetch motorcycle listings.
+    Completely free - no third-party services needed.
     Returns a list of listing dicts with: id, title, price, url, location
     """
-    if not APIFY_API_TOKEN:
-        log.error("APIFY_API_TOKEN not set!")
-        return []
+    log.info(f"Querying Facebook GraphQL API (lat: {SEARCH_LATITUDE}, lng: {SEARCH_LONGITUDE}, radius: {RADIUS_MILES} mi)")
 
-    # Exact FB Marketplace URL with location ID and 24hr filter
-    search_url = "https://www.facebook.com/marketplace/112204368792315/search?minPrice=2500&maxPrice=10000&daysSinceListed=1&query=Motorcycle&exact=false"
-
-    log.info(f"Starting Apify scrape for: {search_url}")
-
-    async with httpx.AsyncClient(timeout=300) as client:
-        # Start Apify actor run
-        try:
-            resp = await client.post(
-                "https://api.apify.com/v2/acts/apify~facebook-marketplace-scraper/runs",
-                headers={"Authorization": f"Bearer {APIFY_API_TOKEN}"},
-                json={
-                    "startUrls": [{"url": search_url}],
-                    "maxItems": 40,
+    # GraphQL query parameters
+    variables = {
+        "count": 40,
+        "params": {
+            "bqf": {
+                "callsite": "COMMERCE_MSITE_MARKETPLACE_FEED",
+                "query": "Motorcycle"
+            },
+            "bqvariables": {
+                "buyLocation": {
+                    "latitude": SEARCH_LATITUDE,
+                    "longitude": SEARCH_LONGITUDE
                 },
+                "priceRange": [MIN_PRICE, MAX_PRICE],
+                "radius": RADIUS_MILES
+            }
+        }
+    }
+
+    # Form-encoded body for GraphQL request
+    form_data = {
+        "variables": json.dumps(variables),
+        "doc_id": "7111939778879383"
+    }
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/json",
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Origin": "https://www.facebook.com",
+        "Referer": "https://www.facebook.com/marketplace/",
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-origin",
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+            resp = await client.post(
+                "https://www.facebook.com/api/graphql/",
+                headers=headers,
+                data=urlencode(form_data),
             )
-            resp.raise_for_status()
-            run_data = resp.json()["data"]
-            run_id = run_data["id"]
-            log.info(f"Apify run started: {run_id}")
-        except Exception as e:
-            log.error(f"Failed to start Apify run: {e}")
-            return []
 
-        # Poll run status (timeout 5 minutes)
-        status_url = f"https://api.apify.com/v2/actor-runs/{run_id}"
-        max_polls = 30  # 30 polls * 10 sec = 5 min
-        for poll_num in range(max_polls):
-            await asyncio.sleep(10)
-            try:
-                resp = await client.get(
-                    status_url,
-                    headers={"Authorization": f"Bearer {APIFY_API_TOKEN}"},
-                )
-                resp.raise_for_status()
-                status = resp.json()["data"]["status"]
-                log.info(f"Apify run status: {status} (poll {poll_num + 1}/{max_polls})")
-
-                if status == "SUCCEEDED":
-                    break
-                elif status in ("FAILED", "ABORTED", "TIMED-OUT"):
-                    log.error(f"Apify run {status}")
-                    return []
-            except Exception as e:
-                log.error(f"Error polling Apify run status: {e}")
+            if resp.status_code != 200:
+                log.error(f"Facebook GraphQL API returned status {resp.status_code}")
+                log.debug(f"Response: {resp.text[:500]}")
                 return []
-        else:
-            log.error("Apify run timed out (5 minutes)")
-            return []
 
-        # Fetch results
-        try:
-            dataset_url = f"https://api.apify.com/v2/actor-runs/{run_id}/dataset/items"
-            resp = await client.get(
-                dataset_url,
-                headers={"Authorization": f"Bearer {APIFY_API_TOKEN}"},
-            )
-            resp.raise_for_status()
-            raw_items = resp.json()
+            data = resp.json()
 
-            # Normalize data
+            # Navigate through the GraphQL response structure
+            try:
+                feed_units = data["data"]["marketplace_search"]["feed_units"]["edges"]
+            except (KeyError, TypeError) as e:
+                log.error(f"Unexpected GraphQL response structure: {e}")
+                log.debug(f"Response keys: {data.keys() if isinstance(data, dict) else 'not a dict'}")
+                return []
+
             listings = []
-            for item in raw_items:
-                # Apify actor returns different field names depending on version
-                listing_id = str(item.get("id") or item.get("listingId") or item.get("itemId", ""))
-                title = item.get("title") or item.get("name") or "Unknown"
-                price = item.get("price")
-                url = item.get("url") or item.get("link", "")
-                location = item.get("location", "")
+            for edge in feed_units:
+                try:
+                    node = edge.get("node", {})
+                    listing_data = node.get("listing", {})
 
-                # Parse price if it's a string like "$4,500"
-                if isinstance(price, str):
-                    price_match = re.search(r'[\d,]+', price.replace("$", ""))
-                    if price_match:
-                        price = int(price_match.group().replace(",", ""))
-                    else:
-                        price = None
+                    if not listing_data:
+                        continue
 
-                if listing_id and price:
-                    listings.append({
-                        "id": listing_id,
-                        "title": title,
-                        "price": price,
-                        "url": url,
-                        "location": location,
-                    })
+                    # Extract listing details
+                    listing_id = listing_data.get("id", "")
+                    title = listing_data.get("marketplace_listing_title", "Unknown")
 
-            log.info(f"Apify returned {len(listings)} valid listings")
+                    # Extract price
+                    price_data = listing_data.get("formatted_price", {})
+                    price_text = price_data.get("text", "")
+                    price = None
+                    if price_text:
+                        price_match = re.search(r'[\d,]+', price_text.replace("$", ""))
+                        if price_match:
+                            price = int(price_match.group().replace(",", ""))
+
+                    # Extract location
+                    location_data = listing_data.get("location", {})
+                    reverse_geocode = location_data.get("reverse_geocode", {})
+                    city = reverse_geocode.get("city", "Unknown")
+
+                    # Extract image URL (optional, for future use)
+                    photo_data = listing_data.get("primary_listing_photo", {})
+                    image_data = photo_data.get("image", {})
+                    image_url = image_data.get("uri", "")
+
+                    # Build marketplace URL
+                    url = f"https://www.facebook.com/marketplace/item/{listing_id}/"
+
+                    if listing_id and price and MIN_PRICE <= price <= MAX_PRICE:
+                        listings.append({
+                            "id": listing_id,
+                            "title": title,
+                            "price": price,
+                            "url": url,
+                            "location": city,
+                            "image_url": image_url,
+                        })
+
+                except Exception as e:
+                    log.debug(f"Error parsing listing node: {e}")
+                    continue
+
+            log.info(f"Facebook GraphQL API returned {len(listings)} valid listings")
             return listings
 
-        except Exception as e:
-            log.error(f"Error fetching Apify results: {e}")
-            return []
+    except httpx.TimeoutException:
+        log.error("Facebook GraphQL API request timed out")
+        return []
+    except Exception as e:
+        log.error(f"Error querying Facebook GraphQL API: {e}")
+        return []
 
 
 # ─── MARKET VALUE ESTIMATOR ───────────────────────────────────────────────────
@@ -342,7 +367,8 @@ def format_deal_message(listing: dict, value_info: dict) -> str:
         f"📋 <b>{listing['title']}</b>\n"
         f"💰 Listed: <b>${listing['price']:,}</b>\n"
         f"📊 {source_label} Value: ~${value_info['market_estimate']:,}\n"
-        f"💸 You Save: ~{value_info['discount_pct']}% below market\n\n"
+        f"💸 You Save: ~{value_info['discount_pct']}% below market\n"
+        f"📍 Location: {listing['location']}\n\n"
         f"🔗 <a href=\"{listing['url']}\">View Listing</a>\n\n"
         f"⏰ Found: {datetime.now().strftime('%b %d, %Y %I:%M %p')}"
     )
@@ -358,7 +384,7 @@ async def run_scan(seen_ids: set) -> set:
 
     listings = await scrape_facebook_marketplace()
     if not listings:
-        log.warning("No listings returned from Apify")
+        log.warning("No listings returned from Facebook GraphQL API")
         return seen_ids
 
     new_deals = 0
@@ -395,16 +421,14 @@ async def main():
     """Main bot loop."""
     log.info("🏍️  Motorcycle Deal Bot starting up...")
     log.info(f"   Price range: ${MIN_PRICE:,}–${MAX_PRICE:,}")
-    log.info(f"   Radius: {RADIUS_MILES} miles from {SEARCH_LOCATION}")
+    log.info(f"   Radius: {RADIUS_MILES} miles from Tustin, CA")
     log.info(f"   Check interval: {CHECK_INTERVAL_SECONDS // 60} minutes")
     log.info(f"   Deal thresholds: 🔥 {int((1-FIRE_DEAL_THRESHOLD)*100)}%+ | ✅ {int((1-GOOD_DEAL_THRESHOLD)*100)}%+")
+    log.info(f"   Using FREE Facebook GraphQL API (no third-party costs!)")
 
     # Verify credentials
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         log.error("ERROR: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not set!")
-        return
-    if not APIFY_API_TOKEN:
-        log.error("ERROR: APIFY_API_TOKEN not set!")
         return
 
     seen_ids = load_seen_ids()
@@ -414,6 +438,7 @@ async def main():
     await send_telegram(
         f"🏍️ <b>Motorcycle Bot is now running!</b>\n"
         f"Searching ${MIN_PRICE:,}–${MAX_PRICE:,} within {RADIUS_MILES} miles.\n"
+        f"Using free Facebook GraphQL API - no costs!\n"
         f"I'll alert you for deals 15%+ below market. 🔥"
     )
 

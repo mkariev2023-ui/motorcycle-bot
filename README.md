@@ -2,10 +2,12 @@
 
 A 24/7 bot that monitors Facebook Marketplace for motorcycle deals and sends instant Telegram alerts when it finds listings significantly below market value.
 
+**100% FREE** - Uses Facebook's GraphQL API directly, no third-party services or costs!
+
 ## What It Does
 
-- **Scrapes Facebook Marketplace** every 30 minutes using Apify API
-- **Searches** in Tustin, CA within 200 miles, price range $3,000–$7,000
+- **Scrapes Facebook Marketplace** every 30 minutes using direct GraphQL API
+- **Searches** Tustin, CA area within 200 miles, price range $2,500–$10,000
 - **Compares** each listing against estimated market value (KBB/NADA/heuristic)
 - **Sends Telegram alerts** instantly for listings 15%+ below market value
 - **Remembers listings** so you never get duplicate alerts
@@ -19,8 +21,8 @@ A 24/7 bot that monitors Facebook Marketplace for motorcycle deals and sends ins
 ## Tech Stack
 
 - **Python 3.11+**
-- **Apify API** (`apify~facebook-marketplace-scraper` actor)
-- **httpx** for all HTTP calls (no Playwright/Selenium needed!)
+- **Facebook GraphQL API** (direct, no third-party service!)
+- **httpx** for HTTP calls
 - **Telegram Bot API** for notifications
 - **Railway.app** worker (no web server needed)
 
@@ -29,6 +31,8 @@ A 24/7 bot that monitors Facebook Marketplace for motorcycle deals and sends ins
 ## Setup Guide
 
 ### Prerequisites
+
+Only need Telegram credentials - that's it!
 
 1. **Telegram Bot Token**
    - Message [@BotFather](https://t.me/BotFather) on Telegram
@@ -39,11 +43,6 @@ A 24/7 bot that monitors Facebook Marketplace for motorcycle deals and sends ins
    - Start a chat with your new bot
    - Visit: `https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates`
    - Find `"chat":{"id":XXXXXXXXX}` in the response
-
-3. **Apify API Token**
-   - Sign up at [apify.com](https://apify.com) (free tier available)
-   - Go to Settings → Integrations → API tokens
-   - Create a new token and save it
 
 ---
 
@@ -80,8 +79,8 @@ In Railway dashboard → Variables tab, add:
 |----------|-------|
 | `TELEGRAM_BOT_TOKEN` | Your Telegram bot token |
 | `TELEGRAM_CHAT_ID` | Your Telegram chat ID |
-| `APIFY_API_TOKEN` | Your Apify API token |
-| `SEARCH_LOCATION` | `tustin-ca` (optional, defaults to this) |
+
+That's it! Only 2 environment variables needed.
 
 ### Step 4: Verify It's Running
 
@@ -100,7 +99,6 @@ pip install -r requirements.txt
 # Set environment variables
 export TELEGRAM_BOT_TOKEN="your_token"
 export TELEGRAM_CHAT_ID="your_chat_id"
-export APIFY_API_TOKEN="your_apify_token"
 
 # Run the bot
 python bot.py
@@ -113,12 +111,14 @@ python bot.py
 Edit `bot.py` to customize:
 
 ```python
-MIN_PRICE = 3000              # Minimum price filter
-MAX_PRICE = 7000              # Maximum price filter
-RADIUS_MILES = 200            # Search radius
+SEARCH_LATITUDE = 33.7175   # Tustin, CA latitude
+SEARCH_LONGITUDE = -117.8311 # Tustin, CA longitude
+MIN_PRICE = 2500             # Minimum price filter
+MAX_PRICE = 10000            # Maximum price filter
+RADIUS_MILES = 200           # Search radius
 CHECK_INTERVAL_SECONDS = 1800 # Scan interval (30 min)
-FIRE_DEAL_THRESHOLD = 0.75    # 25%+ below market
-GOOD_DEAL_THRESHOLD = 0.85    # 15%+ below market
+FIRE_DEAL_THRESHOLD = 0.75   # 25%+ below market
+GOOD_DEAL_THRESHOLD = 0.85   # 15%+ below market
 ```
 
 After editing, commit and push to GitHub:
@@ -142,6 +142,7 @@ Railway will auto-deploy the changes.
 💰 Listed: $4,200
 📊 KBB Value: ~$5,800
 💸 You Save: ~27.6% below market
+📍 Location: Irvine
 
 🔗 View Listing
 
@@ -151,6 +152,15 @@ Railway will auto-deploy the changes.
 ---
 
 ## How It Works
+
+### Direct Facebook GraphQL API
+
+The bot queries Facebook's internal GraphQL API directly:
+- **Endpoint**: `https://www.facebook.com/api/graphql/`
+- **Method**: POST with form-encoded data
+- **Response**: JSON with marketplace listings
+
+No third-party scraping service needed - completely free!
 
 ### Market Value Estimation
 
@@ -162,13 +172,6 @@ Railway will auto-deploy the changes.
    - 3-5 years old: assume 12% below market
    - 6+ years old: assume 15% below market
 
-### Apify Integration
-
-1. **Start run**: POST to Apify actor with search URL
-2. **Poll status**: Check every 10 seconds (max 5 min)
-3. **Fetch results**: Get dataset items when run succeeds
-4. **Parse listings**: Extract ID, title, price, URL
-
 ### Seen Listings
 
 - Stored in `seen_listings.json`
@@ -177,7 +180,7 @@ Railway will auto-deploy the changes.
 
 ### Error Handling
 
-- If Apify run fails: log error, skip cycle, retry next interval
+- If Facebook GraphQL API fails: log error, skip cycle, retry next interval
 - If Telegram fails: retry once after 5 seconds
 - If market value lookup fails: use heuristic fallback
 - Main loop wrapped in try/except so errors never kill the bot
@@ -193,53 +196,75 @@ Railway will auto-deploy the changes.
 
 **Log output example:**
 ```
-2026-03-11 09:30:00 [INFO] Starting Apify scrape...
-2026-03-11 09:30:15 [INFO] Apify run started: abc123
-2026-03-11 09:31:00 [INFO] Apify run status: SUCCEEDED
-2026-03-11 09:31:05 [INFO] Apify returned 23 valid listings
-2026-03-11 09:31:10 [INFO] [123456] 2019 Honda CB500F | $4,200 | -27.6% vs market (kbb)
-2026-03-11 09:31:11 [INFO] Telegram notification sent
-2026-03-11 09:31:45 [INFO] Scan complete. Found 23 listings, sent 2 deal alert(s).
-2026-03-11 09:31:45 [INFO] Sleeping 30 minutes until next scan...
+2026-03-11 09:30:00 [INFO] Querying Facebook GraphQL API (lat: 33.7175, lng: -117.8311, radius: 200 mi)
+2026-03-11 09:30:02 [INFO] Facebook GraphQL API returned 18 valid listings
+2026-03-11 09:30:03 [INFO] [123456] 2019 Honda CB500F | $4,200 | -27.6% vs market (kbb)
+2026-03-11 09:30:04 [INFO] Telegram notification sent
+2026-03-11 09:30:20 [INFO] Scan complete. Found 18 listings, sent 2 deal alert(s).
+2026-03-11 09:30:20 [INFO] Sleeping 30 minutes until next scan...
 ```
-
----
-
-## Free Tier Limits
-
-**Railway**: $5 credit/month (≈500 hours) - plenty for 24/7 operation
-**Apify**: 500 actor compute units/month on free tier - enough for ~1,000 scrapes
-
----
-
-## Troubleshooting
-
-**"APIFY_API_TOKEN not set"**
-- Verify you added the environment variable in Railway dashboard
-- Check spelling and that there are no extra spaces
-
-**"No listings returned from Apify"**
-- Check Apify logs at apify.com/console
-- Verify your Apify account has available compute units
-- Facebook may have changed their HTML structure (wait for Apify actor update)
-
-**"Telegram error: Unauthorized"**
-- Double-check your TELEGRAM_BOT_TOKEN
-- Ensure you started a chat with your bot first
-
-**Bot keeps restarting**
-- Check Railway logs for the error
-- Common issue: Invalid credentials or Apify quota exceeded
 
 ---
 
 ## Cost Estimate
 
-**Completely free** on Railway + Apify free tiers for this use case:
-- Railway: 500 hours/month (this bot uses ~720 hours/month full time, but $5 credit covers it)
-- Apify: 500 compute units/month (each scrape uses ~0.5 units, 30 min intervals = ~1,440 scrapes/month ≈ 720 units)
+**Completely FREE!**
+- Railway: $5 credit/month (≈500 hours) - plenty for 24/7 operation
+- Facebook GraphQL API: Free (no rate limits for reasonable use)
+- KBB/NADA scraping: Free
+- Telegram Bot API: Free
 
-You may need to upgrade Apify to paid tier (~$50/month for 5,000 units) if scraping more frequently or multiple locations.
+No third-party scraping services, no API costs, just free Railway hosting!
+
+---
+
+## Troubleshooting
+
+**"No listings returned from Facebook GraphQL API"**
+- Facebook may have changed their GraphQL API structure
+- Check logs for error details
+- The `doc_id` parameter may need updating (Facebook changes these periodically)
+
+**"Telegram error: Unauthorized"**
+- Double-check your TELEGRAM_BOT_TOKEN
+- Ensure you started a chat with your bot first
+
+**"Facebook GraphQL API returned status 400/403"**
+- Facebook may be rate-limiting or detecting automated requests
+- Wait 30 minutes and let it retry
+- The bot includes proper headers to mimic a real browser
+
+**Bot keeps restarting**
+- Check Railway logs for the error
+- Common issue: Invalid credentials
+
+---
+
+## Advantages Over Apify/Third-Party Services
+
+✅ **100% Free** - No Apify subscription needed ($50/month saved!)
+✅ **Faster** - Direct API calls, no waiting for actor runs
+✅ **More Reliable** - No dependency on third-party service uptime
+✅ **Simpler Setup** - Only 2 environment variables needed
+✅ **No Rate Limits** - (within reasonable use)
+
+---
+
+## Location Customization
+
+To search a different area, update the coordinates in `bot.py`:
+
+```python
+# Example: Los Angeles, CA
+SEARCH_LATITUDE = 34.0522
+SEARCH_LONGITUDE = -118.2437
+
+# Example: San Diego, CA
+SEARCH_LATITUDE = 32.7157
+SEARCH_LONGITUDE = -117.1611
+```
+
+You can find coordinates at [latlong.net](https://www.latlong.net/)
 
 ---
 
