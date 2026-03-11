@@ -139,73 +139,96 @@ async def scrape_facebook_marketplace() -> list[dict]:
             # DEBUG: Log HTML analysis info
             log.info(f"Full HTML length: {len(html)} chars")
 
-            # Find position of first listing data
-            pos = html.find('marketplace_listing_title')
-            if pos != -1:
-                log.info(f"First listing data found at position: {pos}")
+            # Find __bbox position (Facebook's data container)
+            bbox_pos = html.find('__bbox')
+            if bbox_pos != -1:
+                log.info(f"Found '__bbox' at position: {bbox_pos}")
+                # Log snippet around __bbox to see the data structure
+                log.info(f"BBOX SNIPPET: {html[bbox_pos:bbox_pos+500]}")
             else:
-                log.warning("'marketplace_listing_title' not found in HTML")
-                # Try alternative search terms
-                alt_searches = ['__bbox', 'MARKETPLACE', 'listing_price']
-                for term in alt_searches:
-                    alt_pos = html.find(term)
-                    if alt_pos != -1:
-                        log.info(f"Found '{term}' at position: {alt_pos}")
+                log.warning("'__bbox' not found in HTML")
 
-            # Extract embedded JSON data from HTML - search ENTIRE HTML
+            # Log snippet from around position 255000 where __bbox was reported
+            log.info(f"SNIPPET AT 255000: {html[255000:256000]}")
+
+            # Extract embedded JSON data from HTML
             listings = []
 
-            # Direct regex extraction from FULL HTML for listing IDs, titles, and prices
+            # Try to extract __bbox JSON blob
+            bbox_data = None
+            bbox_patterns = [
+                r'__bbox\s*=\s*(\{.*?\})\s*;',
+                r'"__bbox":\s*(\{[^}]+\})',
+                r'__bbox"?:\s*(\{(?:[^{}]|\{[^{}]*\})*\})',
+            ]
 
-            # Extract listing IDs (15-16 digit IDs are marketplace listings)
-            id_pattern = r'"id":"(\d{15,16})"'
-            all_ids = re.findall(id_pattern, html)
-            log.info(f"Found {len(all_ids)} total IDs matching pattern")
+            for pattern in bbox_patterns:
+                bbox_match = re.search(pattern, html, re.DOTALL)
+                if bbox_match:
+                    try:
+                        bbox_json = bbox_match.group(1)
+                        bbox_data = json.loads(bbox_json)
+                        log.info(f"Successfully parsed __bbox JSON using pattern: {pattern[:30]}...")
+                        log.info(f"__bbox keys: {list(bbox_data.keys()) if isinstance(bbox_data, dict) else 'not a dict'}")
+                        break
+                    except Exception as e:
+                        log.debug(f"Failed to parse __bbox JSON: {e}")
 
-            # Extract titles
-            title_pattern = r'"marketplace_listing_title":"([^"]+)"'
-            titles = re.findall(title_pattern, html)
-            log.info(f"Found {len(titles)} titles")
+            # Try alternative patterns for server-side rendered listing data
+            # Pattern 1: listing_id
+            listing_ids = re.findall(r'"listing_id":"(\d+)"', html)
+            log.info(f"Found {len(listing_ids)} listing_ids")
 
-            # Extract prices - try multiple patterns
-            # Pattern 1: amount with USD currency
-            price_pattern1 = r'"amount":"(\d+)"[^}]*"currency":"USD"'
-            prices1 = re.findall(price_pattern1, html)
+            # Pattern 2: name (titles between 10-80 chars)
+            names = re.findall(r'"name":"([^"]{10,80})"', html)
+            log.info(f"Found {len(names)} names")
 
-            # Pattern 2: listing_price with amount
-            price_pattern2 = r'"listing_price":\{"amount":"(\d+)"'
-            prices2 = re.findall(price_pattern2, html)
+            # Pattern 3: price with $ and amount
+            price_pattern = r'"\$":"([^"]+)".*?"amount":"(\d+)"'
+            price_tuples = re.findall(price_pattern, html)
+            log.info(f"Found {len(price_tuples)} price tuples")
 
-            # Use whichever pattern found more results
-            price_matches = prices1 if len(prices1) >= len(prices2) else prices2
-            log.info(f"Found {len(prices1)} prices (pattern 1), {len(prices2)} prices (pattern 2)")
-            log.info(f"Using {len(price_matches)} prices from better pattern")
+            # Also try simpler patterns
+            simple_listing_ids = re.findall(r'"id":"(\d{15,16})"', html)
+            log.info(f"Found {len(simple_listing_ids)} simple IDs (15-16 digits)")
 
-            # Filter IDs to only marketplace listings (15-16 digits, appear near titles)
+            # Combine data sources - prioritize listing_ids if found
+            ids_to_use = listing_ids if len(listing_ids) > 0 else simple_listing_ids
+            titles_to_use = names
+
+            # Extract prices from tuples
+            price_matches = [int(amount) for _, amount in price_tuples] if price_tuples else []
+
+            log.info(f"Using {len(ids_to_use)} IDs, {len(titles_to_use)} titles, {len(price_matches)} prices")
+
             # Match up IDs, titles, and prices (they should appear in same order in the HTML)
-
-            # Since we have titles, try to match IDs that appear near each title
-            # For simplicity, assume they appear in order: ID, title, price
-            max_items = min(len(all_ids), len(titles), len(price_matches))
+            max_items = min(len(ids_to_use), len(titles_to_use), len(price_matches)) if price_matches else min(len(ids_to_use), len(titles_to_use))
 
             log.info(f"Attempting to match up {max_items} listings from IDs/titles/prices")
 
             for i in range(max_items):
                 try:
                     # Try to get the i-th ID, title, and price
-                    listing_id = all_ids[i] if i < len(all_ids) else None
-                    title = titles[i] if i < len(titles) else None
-                    price_str = price_matches[i] if i < len(price_matches) else None
+                    listing_id = ids_to_use[i] if i < len(ids_to_use) else None
+                    title = titles_to_use[i] if i < len(titles_to_use) else None
+                    price = price_matches[i] if i < len(price_matches) else None
 
-                    if not all([listing_id, title, price_str]):
+                    if not listing_id or not title:
                         continue
 
-                    # Parse price (prices from regex are already just numbers)
-                    try:
-                        price = int(price_str)
-                    except (ValueError, TypeError):
-                        log.debug(f"Could not parse price: {price_str}")
-                        continue
+                    # If we don't have price data, try to extract it from title or skip
+                    if not price:
+                        # Try to extract price from title if it contains a dollar amount
+                        price_in_title = re.search(r'\$?([\d,]+)', title)
+                        if price_in_title:
+                            try:
+                                price = int(price_in_title.group(1).replace(',', ''))
+                            except:
+                                log.debug(f"Could not parse price from title: {title}")
+                                continue
+                        else:
+                            log.debug(f"No price available for listing {listing_id}")
+                            continue
 
                     # Build listing URL
                     url = f"https://www.facebook.com/marketplace/item/{listing_id}/"
