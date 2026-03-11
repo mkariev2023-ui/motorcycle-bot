@@ -1,0 +1,15 @@
+services:
+  - type: worker
+    name: motorcycle-bot
+    env: python
+    buildCommand: pip install -r requirements.txt && playwright install --with-deps chromium
+    startCommand: python bot.py
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: SEARCH_LOCATION
+        value: Tustin
+      - key: SEARCH_ZIP
+        value: "92782"
