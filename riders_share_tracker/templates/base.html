@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Riders Tracker">
+  <meta name="theme-color" content="#0f172a">
+  <title>{% block title %}Riders Share Tracker{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <header class="topbar">
+    <h1>{% block header %}Riders Share Tracker{% endblock %}</h1>
+  </header>
+
+  <main class="content">
+    {% block content %}{% endblock %}
+  </main>
+
+  <nav class="bottom-nav">
+    <a href="{{ url_for('dashboard') }}" class="{{ 'active' if request.endpoint == 'dashboard' }}">
+      <span class="icon">&#9679;</span><span>Home</span>
+    </a>
+    <a href="{{ url_for('calendar_view') }}" class="{{ 'active' if request.endpoint == 'calendar_view' }}">
+      <span class="icon">&#128197;</span><span>Calendar</span>
+    </a>
+    <a href="{{ url_for('bookings_list') }}" class="{{ 'active' if request.endpoint in ['bookings_list','booking_new','booking_edit'] }}">
+      <span class="icon">&#128176;</span><span>Bookings</span>
+    </a>
+    <a href="{{ url_for('bikes_list') }}" class="{{ 'active' if request.endpoint in ['bikes_list','bike_new','bike_edit'] }}">
+      <span class="icon">&#127949;</span><span>Bikes</span>
+    </a>
+    <a href="{{ url_for('maintenance_list') }}" class="{{ 'active' if request.endpoint in ['maintenance_list','maintenance_new'] }}">
+      <span class="icon">&#128295;</span><span>Maint.</span>
+    </a>
+    <a href="{{ url_for('owners_list') }}" class="{{ 'active' if request.endpoint == 'owners_list' }}">
+      <span class="icon">&#128100;</span><span>Owners</span>
+    </a>
+  </nav>
+</body>
+</html>

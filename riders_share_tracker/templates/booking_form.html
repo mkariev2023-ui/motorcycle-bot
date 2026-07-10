@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block title %}{{ 'Edit Booking' if booking else 'New Booking' }}{% endblock %}
+{% block content %}
+<form method="post">
+  <div>
+    <label>Bike</label>
+    <select name="bike_id" required>
+      {% for bike in bikes %}
+      <option value="{{ bike.id }}" {{ 'selected' if booking and booking.bike_id == bike.id }}>{{ bike.name }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div class="btn-row">
+    <div style="flex:1">
+      <label>Start date</label>
+      <input type="date" name="start_date" value="{{ booking.start_date if booking else '' }}" required>
+    </div>
+    <div style="flex:1">
+      <label>End date</label>
+      <input type="date" name="end_date" value="{{ booking.end_date if booking else '' }}" required>
+    </div>
+  </div>
+  <div>
+    <label>Payout amount (what Riders Share paid out to you, $)</label>
+    <input type="number" step="0.01" name="payout_amount" value="{{ booking.payout_amount if booking else '' }}" required>
+  </div>
+  <div>
+    <label>Renter name (optional)</label>
+    <input type="text" name="renter_name" value="{{ booking.renter_name if booking and booking.renter_name else '' }}">
+  </div>
+  <div>
+    <label>Status</label>
+    <select name="status">
+      {% for s in ['upcoming', 'active', 'completed', 'cancelled'] %}
+      <option value="{{ s }}" {{ 'selected' if booking and booking.status == s or (not booking and s == 'completed') }}>{{ s|capitalize }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div>
+    <label>Notes</label>
+    <textarea name="notes">{{ booking.notes if booking and booking.notes else '' }}</textarea>
+  </div>
+  <div class="btn-row">
+    <button type="submit" class="btn">{{ 'Save' if booking else 'Add booking' }}</button>
+    <a href="{{ url_for('bookings_list') }}" class="btn secondary">Cancel</a>
+  </div>
+</form>
+
+{% if booking %}
+<form method="post" action="{{ url_for('booking_delete', booking_id=booking.id) }}"
+      onsubmit="return confirm('Delete this booking?');">
+  <button type="submit" class="btn danger">Delete booking</button>
+</form>
+{% endif %}
+{% endblock %}

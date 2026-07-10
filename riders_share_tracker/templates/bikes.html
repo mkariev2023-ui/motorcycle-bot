@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}Bikes{% endblock %}
+{% block content %}
+<div class="card">
+  {% if bikes %}
+    {% for bike in bikes %}
+    <div class="row">
+      <a href="{{ url_for('bike_edit', bike_id=bike.id) }}" style="text-decoration:none; color: inherit; flex:1;">
+        <div class="main">{{ bike.name }} {% if not bike.active %}<span class="badge">inactive</span>{% endif %}</div>
+        <div class="sub">
+          {{ bike.year or '' }} {{ bike.make or '' }} {{ bike.model or '' }}
+          {% if bike.ownership == 'managed' %} · {{ bike.owner_name }} ({{ (bike.split_pct*100)|round|int }}% you){% endif %}
+        </div>
+      </a>
+      <span class="badge {{ bike.ownership }}">{{ 'Own' if bike.ownership == 'own' else 'Managed' }}</span>
+    </div>
+    {% endfor %}
+  {% else %}
+    <div class="empty-state">No bikes yet. Add your 4 owned bikes and the 6 you manage.</div>
+  {% endif %}
+</div>
+<a href="{{ url_for('bike_new') }}" class="fab">+</a>
+{% endblock %}

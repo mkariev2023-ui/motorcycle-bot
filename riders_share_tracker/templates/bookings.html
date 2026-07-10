@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}Bookings{% endblock %}
+{% block content %}
+<div class="month-nav">
+  <a href="{{ url_for('bookings_list', month=prev_month, bike_id=bike_id) }}">&larr;</a>
+  <span>{{ month_str }}</span>
+  <a href="{{ url_for('bookings_list', month=next_month, bike_id=bike_id) }}">&rarr;</a>
+</div>
+
+<form method="get" style="margin-bottom: 14px;">
+  <input type="hidden" name="month" value="{{ month_str }}">
+  <select name="bike_id" onchange="this.form.submit()">
+    <option value="">All bikes</option>
+    {% for bike in bikes %}
+    <option value="{{ bike.id }}" {{ 'selected' if bike_id == bike.id }}>{{ bike.name }}</option>
+    {% endfor %}
+  </select>
+</form>
+
+<div class="card">
+  {% if rows %}
+    {% for r in rows %}
+    <a href="{{ url_for('booking_edit', booking_id=r.b.id) }}" style="text-decoration:none; color:inherit;">
+      <div class="row">
+        <div>
+          <div class="main">{{ r.b.bike_name }}{% if r.b.renter_name %} · {{ r.b.renter_name }}{% endif %}</div>
+          <div class="sub">{{ r.b.start_date }} → {{ r.b.end_date }} · {{ r.b.status }}
+            {% if r.b.ownership == 'managed' %} · you ${{ '%.0f'|format(r.your_cut) }} / owner ${{ '%.0f'|format(r.owner_cut) }}{% endif %}
+          </div>
+        </div>
+        <div class="amount">${{ '%.0f'|format(r.b.payout_amount) }}</div>
+      </div>
+    </a>
+    {% endfor %}
+  {% else %}
+    <div class="empty-state">No bookings this month. <a href="{{ url_for('booking_new') }}">Add one</a>.</div>
+  {% endif %}
+</div>
+<a href="{{ url_for('booking_new') }}" class="fab">+</a>
+{% endblock %}

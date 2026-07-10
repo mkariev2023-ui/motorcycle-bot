@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block title %}Owner Statements{% endblock %}
+{% block content %}
+<div class="month-nav">
+  <a href="{{ url_for('owners_list', month=prev_month) }}">&larr;</a>
+  <span>{{ month_str }}</span>
+  <a href="{{ url_for('owners_list', month=next_month) }}">&rarr;</a>
+</div>
+
+{% if statements %}
+  {% for s in statements %}
+  <div class="card">
+    <div class="row">
+      <div class="main">{{ s.owner_name }}</div>
+      <div class="sub">{{ s.bikes|map(attribute='name')|join(', ') }}</div>
+    </div>
+    <div class="row">
+      <div>Total payout</div>
+      <div class="amount">${{ '%.0f'|format(s.total_payout) }}</div>
+    </div>
+    <div class="row">
+      <div>Owed to {{ s.owner_name }}</div>
+      <div class="amount">${{ '%.0f'|format(s.total_owner_cut) }}</div>
+    </div>
+    <div class="row">
+      <div>Your cut</div>
+      <div class="amount">${{ '%.0f'|format(s.total_your_cut) }}</div>
+    </div>
+    <div class="row">
+      <div>Bookings</div>
+      <div class="amount">{{ s.booking_count }}</div>
+    </div>
+  </div>
+  {% endfor %}
+{% else %}
+  <div class="empty-state">No managed bikes with an owner set yet.</div>
+{% endif %}
+{% endblock %}

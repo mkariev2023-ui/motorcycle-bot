@@ -26,6 +26,9 @@ wheels/
 # Bot data
 seen_listings.json
 
+# Riders Share tracker data
+riders_share_tracker/data/*.db
+
 # IDE
 .vscode/
 .idea/

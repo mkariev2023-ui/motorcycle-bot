@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}Sync{% endblock %}
+{% block content %}
+<div class="card">
+  <p>Attempts to pull your booking history directly from Riders Share using your logged-in session cookie.</p>
+  {% if not has_cookie %}
+  <p class="sub">No <code>RS_COOKIE_HEADER</code> is set, so this will just log what it finds without saving anything. See README.md for how to grab your cookie header from Safari/Chrome dev tools.</p>
+  {% endif %}
+  <form method="post">
+    <button type="submit" class="btn">Run sync now</button>
+  </form>
+</div>
+
+{% if result %}
+<h2>Result</h2>
+<div class="card">
+  <p><strong>{{ result.status }}</strong></p>
+  {% if result.imported is defined %}<p>Imported: {{ result.imported }} booking(s)</p>{% endif %}
+  {% if result.log %}
+  <pre style="white-space: pre-wrap; font-size: 0.75rem; color: var(--muted);">{{ result.log }}</pre>
+  {% endif %}
+</div>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}Maintenance{% endblock %}
+{% block content %}
+<div class="card">
+  {% if records %}
+    {% for m in records %}
+    <div class="row">
+      <div>
+        <div class="main">{{ m.bike_name }} · {{ m.type }}</div>
+        <div class="sub">
+          {{ m.date }}{% if m.odometer %} · {{ m.odometer }} mi{% endif %}
+          {% if m.next_due_date %} · next due {{ m.next_due_date }}{% endif %}
+        </div>
+      </div>
+      <div class="amount">${{ '%.0f'|format(m.cost) }}</div>
+    </div>
+    {% endfor %}
+  {% else %}
+    <div class="empty-state">No maintenance logged yet.</div>
+  {% endif %}
+</div>
+<a href="{{ url_for('maintenance_new') }}" class="fab">+</a>
+{% endblock %}

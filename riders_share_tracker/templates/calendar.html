@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block title %}Calendar{% endblock %}
+{% block content %}
+<div class="month-nav">
+  <a href="{{ url_for('calendar_view', month=prev_month, bike_id=bike_id) }}">&larr;</a>
+  <span>{{ month_str }}</span>
+  <a href="{{ url_for('calendar_view', month=next_month, bike_id=bike_id) }}">&rarr;</a>
+</div>
+
+<form method="get" style="margin-bottom: 14px;">
+  <input type="hidden" name="month" value="{{ month_str }}">
+  <select name="bike_id" onchange="this.form.submit()">
+    <option value="">All bikes</option>
+    {% for bike in bikes %}
+    <option value="{{ bike.id }}" {{ 'selected' if bike_id == bike.id }}>{{ bike.name }}</option>
+    {% endfor %}
+  </select>
+</form>
+
+<div class="cal-grid">
+  {% for dow in ['S','M','T','W','T','F','S'] %}
+  <div class="cal-dow">{{ dow }}</div>
+  {% endfor %}
+  {% for _ in range(leading_blanks) %}
+  <div class="cal-day blank"></div>
+  {% endfor %}
+  {% for d in range(1, days_in_month + 1) %}
+  <div class="cal-day {{ 'today' if period_start.year == today.year and period_start.month == today.month and d == today.day }}">
+    <div class="num">{{ d }}</div>
+    {% for bk in day_bookings[d][:3] %}
+    <span class="dot" title="{{ bk.bike_name }}"></span>
+    {% endfor %}
+  </div>
+  {% endfor %}
+</div>
+
+<h2>Bookings this month</h2>
+<div class="card">
+  {% set flat = day_bookings.values() | sum(start=[]) %}
+  {% set seen = [] %}
+  {% for d, bks in day_bookings.items() %}
+    {% for bk in bks %}
+      {% if bk.id not in seen %}
+        {% set _ = seen.append(bk.id) %}
+        <div class="row">
+          <div>
+            <div class="main">{{ bk.bike_name }}</div>
+            <div class="sub">{{ bk.start_date }} → {{ bk.end_date }}</div>
+          </div>
+          <div class="amount">${{ '%.0f'|format(bk.payout_amount) }}</div>
+        </div>
+      {% endif %}
+    {% endfor %}
+  {% endfor %}
+  {% if not seen %}
+  <div class="empty-state">No bookings this month.</div>
+  {% endif %}
+</div>
+{% endblock %}

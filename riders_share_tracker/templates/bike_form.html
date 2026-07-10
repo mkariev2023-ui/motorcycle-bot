@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+{% block title %}{{ 'Edit Bike' if bike else 'New Bike' }}{% endblock %}
+{% block content %}
+<form method="post" id="bike-form">
+  <div>
+    <label>Name / nickname</label>
+    <input type="text" name="name" value="{{ bike.name if bike else '' }}" required>
+  </div>
+  <div class="btn-row">
+    <div style="flex:1">
+      <label>Make</label>
+      <input type="text" name="make" value="{{ bike.make if bike else '' }}">
+    </div>
+    <div style="flex:1">
+      <label>Model</label>
+      <input type="text" name="model" value="{{ bike.model if bike else '' }}">
+    </div>
+    <div style="flex:1">
+      <label>Year</label>
+      <input type="number" name="year" value="{{ bike.year if bike else '' }}">
+    </div>
+  </div>
+
+  <div>
+    <label>Ownership</label>
+    <select name="ownership" id="ownership-select" onchange="toggleOwnerFields()">
+      <option value="own" {{ 'selected' if bike and bike.ownership == 'own' }}>Own (100% yours)</option>
+      <option value="managed" {{ 'selected' if bike and bike.ownership == 'managed' }}>Managed for another owner</option>
+    </select>
+  </div>
+
+  <div id="owner-fields">
+    <div>
+      <label>Owner name</label>
+      <input type="text" name="owner_name" value="{{ bike.owner_name if bike and bike.owner_name else '' }}">
+    </div>
+    <div>
+      <label>Your split % (0.5 = 50/50)</label>
+      <input type="number" step="0.01" min="0" max="1" name="split_pct" value="{{ bike.split_pct if bike and bike.ownership == 'managed' else 0.5 }}">
+    </div>
+  </div>
+
+  <div>
+    <label>Current odometer</label>
+    <input type="number" name="odometer" value="{{ bike.odometer if bike else 0 }}">
+  </div>
+
+  {% if bike %}
+  <div>
+    <label style="display:flex; align-items:center; gap:8px;">
+      <input type="checkbox" name="active" style="width:auto;" {{ 'checked' if bike.active }}> Active
+    </label>
+  </div>
+  {% endif %}
+
+  <div class="btn-row">
+    <button type="submit" class="btn">{{ 'Save' if bike else 'Add bike' }}</button>
+    <a href="{{ url_for('bikes_list') }}" class="btn secondary">Cancel</a>
+  </div>
+</form>
+
+{% if bike %}
+<form method="post" action="{{ url_for('bike_delete', bike_id=bike.id) }}"
+      onsubmit="return confirm('Delete {{ bike.name }}? This also deletes its bookings and maintenance records.');">
+  <button type="submit" class="btn danger">Delete bike</button>
+</form>
+{% endif %}
+
+<script>
+function toggleOwnerFields() {
+  var sel = document.getElementById('ownership-select');
+  var fields = document.getElementById('owner-fields');
+  fields.style.display = sel.value === 'managed' ? 'flex' : 'none';
+}
+document.addEventListener('DOMContentLoaded', function() {
+  document.getElementById('owner-fields').style.display = 'flex';
+  document.getElementById('owner-fields').style.flexDirection = 'column';
+  document.getElementById('owner-fields').style.gap = '12px';
+  toggleOwnerFields();
+});
+</script>
+{% endblock %}
