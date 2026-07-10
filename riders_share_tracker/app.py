@@ -6,14 +6,35 @@ and owner statements across a fleet of Riders Share bikes.
 """
 
 import calendar
+import functools
+import hmac
 import os
 from datetime import date, datetime, timedelta
 
-from flask import Flask, redirect, render_template, request, url_for
+from flask import Flask, jsonify, redirect, render_template, request, url_for
 
 import db
 
 app = Flask(__name__)
+
+API_TOKEN = os.getenv("API_TOKEN")
+
+
+def require_api_token(f):
+    """Guard for /api/* routes hit by the iOS Shortcut. Requires the
+    X-API-Key header to match the API_TOKEN env var (set your own long
+    random value - see README's Shortcuts section)."""
+
+    @functools.wraps(f)
+    def wrapper(*args, **kwargs):
+        if not API_TOKEN:
+            return jsonify({"error": "Server has no API_TOKEN configured"}), 503
+        provided = request.headers.get("X-API-Key", "")
+        if not hmac.compare_digest(provided, API_TOKEN):
+            return jsonify({"error": "Invalid or missing X-API-Key header"}), 401
+        return f(*args, **kwargs)
+
+    return wrapper
 
 
 # ─── SPLIT / CUT CALCULATIONS ────────────────────────────────────────────────
@@ -451,6 +472,94 @@ def sync():
 
         result = scraper.sync_bookings(db.get_conn())
     return render_template("sync.html", result=result, has_cookie=bool(os.getenv("RS_COOKIE_HEADER")))
+
+
+# ─── DEVICE API (for the iOS Shortcut) ───────────────────────────────────────
+# Instead of scraping Riders Share's servers, these endpoints let a Shortcut
+# running on your phone push data it already has (from a quick form, an
+# OCR'd screenshot, or a parsed email) straight into the tracker.
+
+@app.route("/api/health")
+def api_health():
+    """Unauthenticated - just lets the Shortcut confirm the URL is reachable."""
+    return jsonify({"status": "ok"})
+
+
+@app.route("/api/bikes")
+@require_api_token
+def api_bikes():
+    conn = db.get_conn()
+    bikes = conn.execute(
+        "SELECT id, name, ownership, owner_name, split_pct FROM bikes WHERE active = 1 ORDER BY name"
+    ).fetchall()
+    conn.close()
+    return jsonify([dict(b) for b in bikes])
+
+
+@app.route("/api/bookings", methods=["POST"])
+@require_api_token
+def api_booking_create():
+    payload = request.get_json(silent=True) or request.form
+    conn = db.get_conn()
+
+    bike = None
+    if payload.get("bike_id"):
+        bike = conn.execute("SELECT * FROM bikes WHERE id = ?", (payload["bike_id"],)).fetchone()
+    elif payload.get("bike_name"):
+        bike = conn.execute(
+            "SELECT * FROM bikes WHERE active = 1 AND lower(name) = lower(?)", (payload["bike_name"],)
+        ).fetchone()
+
+    if not bike:
+        valid_names = [r["name"] for r in conn.execute("SELECT name FROM bikes WHERE active = 1")]
+        conn.close()
+        return jsonify({"error": "Unknown bike", "valid_bike_names": valid_names}), 404
+
+    for field in ("start_date", "end_date", "payout_amount"):
+        if not payload.get(field):
+            conn.close()
+            return jsonify({"error": f"Missing required field: {field}"}), 400
+
+    try:
+        payout_amount = float(payload["payout_amount"])
+    except (TypeError, ValueError):
+        conn.close()
+        return jsonify({"error": "payout_amount must be a number"}), 400
+
+    cur = conn.execute(
+        """INSERT OR IGNORE INTO bookings
+           (bike_id, start_date, end_date, payout_amount, renter_name, platform_booking_id,
+            status, source, notes)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'device', ?)""",
+        (
+            bike["id"],
+            payload["start_date"],
+            payload["end_date"],
+            payout_amount,
+            payload.get("renter_name", ""),
+            payload.get("platform_booking_id") or None,
+            payload.get("status", "completed"),
+            payload.get("notes", ""),
+        ),
+    )
+    conn.commit()
+
+    if cur.rowcount == 0:
+        conn.close()
+        return jsonify({"status": "duplicate", "message": "A booking with that platform_booking_id already exists"}), 200
+
+    your_cut, owner_cut = booking_cuts(bike, payout_amount)
+    conn.close()
+    return jsonify(
+        {
+            "status": "ok",
+            "booking_id": cur.lastrowid,
+            "bike_name": bike["name"],
+            "payout_amount": payout_amount,
+            "your_cut": your_cut,
+            "owner_cut": owner_cut,
+        }
+    ), 201
 
 
 if __name__ == "__main__":

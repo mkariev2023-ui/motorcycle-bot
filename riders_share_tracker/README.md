@@ -60,27 +60,81 @@ on redeploy.
    ones) with the payout amount Riders Share actually paid you.
 4. Check **Dashboard** and **Owners** for running totals.
 
-## Syncing from Riders Share
+## Logging bookings from your iPhone with a Shortcut (recommended)
 
-Riders Share's dashboard is a logged-in web app, not a public API, so
-`scraper.py` works the same way `bot.py` (the Facebook Marketplace bot
-elsewhere in this repo) does: it sends your real browser session cookie
-with the request and looks for embedded booking data in the response.
+Instead of scraping Riders Share's servers, an **iOS Shortcut** running on
+your own phone can push data straight into the tracker — you're just
+using the device you're already logged into Riders Share on, over an API
+the tracker exposes for exactly this.
 
-This **will need one round of iteration** — the exact page/API structure
-can't be verified without a live logged-in session to test against.
+### 1. Set an API token
 
-To try it:
+Pick a long random value and set it as an environment variable on your
+deployment (or locally when testing):
 
-1. Log into ridersshare.com in Safari or Chrome on your computer.
-2. Open Dev Tools → Network tab, reload your bookings/host dashboard page.
-3. Click the main document request, find the `Cookie` request header, copy
-   its full value.
-4. Set it as an environment variable: `RS_COOKIE_HEADER="<paste here>"`.
-5. Go to **Dashboard → Sync from Riders Share → Run sync now**.
-6. It'll log what it finds (status codes, any booking-shaped JSON keys).
-   Share that log in a follow-up session and the field-mapping in
-   `scraper.py` can be tightened to actually import bookings.
+```bash
+export API_TOKEN=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
+```
 
-Until that's dialed in, manual entry is the reliable path and only takes
-a few seconds per booking.
+Keep this value handy — the Shortcut needs to send it on every request.
+Without `API_TOKEN` set, the `/api/*` endpoints refuse all requests.
+
+### 2. Build the Shortcut
+
+Open the **Shortcuts** app on your iPhone → **+** → add these actions in
+order:
+
+1. **Choose from Menu** — title it "Which bike?", add a menu item for each
+   of your 10 bikes (edit this list if your fleet changes).
+2. **Ask for Input** → Date, prompt "Start date".
+3. **Ask for Input** → Date, prompt "End date".
+4. **Format Date** on the start date result → Date Format: Custom →
+   `yyyy-MM-dd`. Do the same for the end date. (The API needs
+   `YYYY-MM-DD` strings, not Shortcuts' native date format.)
+5. **Ask for Input** → Number, prompt "Payout amount ($)".
+6. **Ask for Input** → Text, prompt "Renter name (optional)".
+7. **Get Contents of URL**:
+   - URL: `https://<your-deployed-url>/api/bookings`
+   - Method: `POST`
+   - Headers: `X-API-Key` → your `API_TOKEN` value; `Content-Type` →
+     `application/json`
+   - Request Body: **JSON**, with fields:
+     - `bike_name` → the Menu result from step 1
+     - `start_date` / `end_date` → the formatted dates from step 4
+     - `payout_amount` → the Number from step 5
+     - `renter_name` → the Text from step 6
+8. **Get Dictionary from Input** on the result of step 7, then
+   **Show Notification** or **Show Result** displaying the `your_cut` and
+   `owner_cut` values, so you get instant confirmation of the split.
+
+Add it to your Home Screen (or trigger with "Hey Siri, log a rental") so
+logging a booking after each rental takes about 10 seconds.
+
+Test the API is reachable first with:
+
+```bash
+curl https://<your-deployed-url>/api/health
+curl -H "X-API-Key: $API_TOKEN" https://<your-deployed-url>/api/bikes
+```
+
+### Other device-side options
+
+The same `/api/bookings` endpoint also works from:
+- A **Screenshot + OCR Shortcut** — an automation on "screenshot taken"
+  that runs Apple's on-device text recognition on a Riders Share booking
+  screen, tries to pull out dates/amount, and posts them (needs the parsing
+  logic dialed in against real screenshots — more fragile than the
+  quick-log form above).
+- An **email-parsing Shortcut** — a Mail automation that fires when a
+  booking/payout email from Riders Share arrives and forwards the parsed
+  fields (only viable if those emails have a consistent structure).
+- **Riders Share's Share Sheet**, if a trip/booking screen exposes one.
+
+## Alternative: scraping Riders Share's servers (not recommended)
+
+`scraper.py` is a discovery-first scraper (same pattern as `bot.py`, the
+Facebook Marketplace bot elsewhere in this repo) that sends your browser
+session cookie with a request and looks for embedded booking JSON. It's
+kept here as a fallback, but the Shortcut approach above is simpler, more
+reliable, and doesn't risk Riders Share's bot detection flagging your
+account. See `scraper.py`'s docstring if you want to try it anyway.
